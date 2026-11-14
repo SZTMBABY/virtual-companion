@@ -46,6 +46,9 @@ command -v gh  >/dev/null || die "找不到 gh（GitHub CLI）。装好后运行
 gh auth status >/dev/null 2>&1 || die "gh 未登录。先运行：gh auth login
       （登录后重跑本脚本即可）"
 info "gh 已登录：$(gh api user --jq .login 2>/dev/null || echo '?')"
+# 让 git 直接复用 gh 的凭据（否则 git push 会因为没有 credential helper 而报
+# "could not read Username for 'https://github.com'"）
+gh auth setup-git >/dev/null 2>&1 || true
 
 [ -z "$(git status --porcelain)" ] || die "工作区不干净，先提交或 stash：
 $(git status --short)"
@@ -100,7 +103,11 @@ fi
 # 3. 推送
 # ---------------------------------------------------------------------------
 say "推送"
-run git push -u origin "$BRANCH"
+# gh repo create --push 通常已经推过一次；这里再推一次以覆盖「仓库已存在」的情况。
+if ! run git push -u origin "$BRANCH"; then
+  info "git push 失败：确认已运行 gh auth setup-git，或手动 git push -u origin $BRANCH"
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 4. 可选：发布 Release（debug 签名 APK）
