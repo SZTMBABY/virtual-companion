@@ -1,0 +1,13 @@
+# 运行时大二进制清单（不进 git）。格式：<sha256>  <仓库内相对路径>
+# 由 tools/fetch_models.sh 下载并校验。上游来源与改名规则见脚本内注释。
+a8d09d1d32f3eb8520482c6d3d43fae674681c5b050385967c70a3c2c9bf0ee7  app/libs/sherpa-onnx.aar
+22f123bb8cba9b38974b3df18a3f45e7081f4985ebb2e075d9f21f618c468bbf  app/src/main/assets/asr/decoder.int8.onnx
+1c556ea57cec304e55ec4b72e52c1cc098bb01476ed7d90f3de939fe126487b1  app/src/main/assets/asr/encoder.int8.onnx
+a7cf9d82757bdcf786059454495a9ca95e4bd7347f72473fc08d794475c36169  app/src/main/assets/asr/joiner.int8.onnx
+8b294db9045d6e5f94647f4c1eec1af4da143a75053c399611444b378ff966ac  app/src/main/assets/asr/tokens.txt
+63a22dd60f40fff082ac3e09afa507f6787da36df76ded2fbe145fa233e22c21  app/src/main/assets/kws/decoder.onnx
+408bbd740838c42d5bf6d1c5b80b3c88b616c7860b92d980328b5b068c76ae48  app/src/main/assets/kws/encoder.int8.onnx
+190d4067b4cc20b72a42a1916e69d92052000fb7051a427ebb1bc72a69207dc1  app/src/main/assets/kws/joiner.int8.onnx
+f7000ec3a90544c0c7c16090d8951779c2b322e14dad5006290f498567d439ea  app/src/main/assets/kws/en.phone
+2d3f32311f9b692b964da3c90e830258d3e78e013cb0c992dbfb15cd5a1a71b0  app/src/main/assets/kws/tokens.txt
+2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f  app/src/main/assets/vad/silero_vad.onnx

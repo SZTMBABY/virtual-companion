@@ -4,6 +4,32 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+// Large binaries are not committed (see tools/models.sha256). Fail with the fix
+// command instead of a cryptic "module not found" / "file not found" error.
+val missingModels = listOf(
+    "libs/sherpa-onnx.aar",
+    "src/main/assets/asr/encoder.int8.onnx",
+    "src/main/assets/asr/decoder.int8.onnx",
+    "src/main/assets/asr/joiner.int8.onnx",
+    "src/main/assets/asr/tokens.txt",
+    "src/main/assets/kws/encoder.int8.onnx",
+    "src/main/assets/kws/decoder.onnx",
+    "src/main/assets/kws/joiner.int8.onnx",
+    "src/main/assets/kws/en.phone",
+    "src/main/assets/kws/tokens.txt",
+    "src/main/assets/vad/silero_vad.onnx",
+).filterNot { file(it).exists() }
+
+if (missingModels.isNotEmpty()) {
+    throw GradleException(
+        "缺少构建所需的模型 / 原生库（${missingModels.size} 个）：\n" +
+            missingModels.joinToString("\n") { "  - app/$it" } +
+            "\n\n先运行：\n  bash tools/fetch_models.sh\n" +
+            "（国内网络可加 GH_PROXY，例如 GH_PROXY=https://ghfast.top）\n" +
+            "详见 README「快速开始」。"
+    )
+}
+
 android {
     namespace = "com.example.virtualcompanion"
     compileSdk {

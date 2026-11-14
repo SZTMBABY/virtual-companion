@@ -1,0 +1,78 @@
+name: Android CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build + unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # compileSdk 37 may only exist in the preview channel on the runner image.
+      - name: Install SDK platform
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "platform-tools" --channel=3 > /dev/null || true
+          for pkg in "platforms;android-37" "platforms;android-37.0"; do
+            echo "trying $pkg"
+            sdkmanager --install "$pkg" --channel=3 && break || true
+          done
+          sdkmanager --list_installed | sed -n '1,40p'
+
+      # Large binaries are not in git; the script verifies every sha256.
+      - name: Cache model downloads
+        uses: actions/cache@v4
+        with:
+          path: .cache/models
+          key: models-${{ hashFiles('tools/models.sha256') }}
+
+      - name: Fetch models and native libraries
+        run: bash tools/fetch_models.sh
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Compile
+        run: ./gradlew :app:assembleDebug --stacktrace --console=plain
+
+      - name: Unit tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace --console=plain
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report
+          path: app/build/reports/tests/
+          if-no-files-found: ignore
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: ignore

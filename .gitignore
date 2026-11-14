@@ -19,11 +19,28 @@ local.properties
 /.kotlin
 /build
 
-# Scratch download/unpack dirs (models are re-fetched by scripts/fetch_models.sh)
+# Scratch download/unpack dirs used by tools/fetch_models.sh
 /.tmp_aar
 /.tmp_asr
 /.tmp_kws
 /.tmpres
+/scripts/tmp
+
+# Model / native-lib cache for tools/fetch_models.sh (safe to delete, re-downloaded)
+/.cache
+
+# ---- Large binaries: NOT committed ----
+# Gradle/AAR payloads are downloaded by tools/fetch_models.sh and verified
+# against tools/models.sha256. Keeping them out of git keeps clones small and
+# avoids re-publishing upstream binaries (sherpa-onnx, Silero VAD) or models.
+/app/libs/*.aar
+/app/libs/*.jar
+/app/src/main/assets/asr/*.onnx
+/app/src/main/assets/asr/tokens.txt
+/app/src/main/assets/kws/*.onnx
+/app/src/main/assets/kws/en.phone
+/app/src/main/assets/kws/tokens.txt
+/app/src/main/assets/vad/*.onnx
 
 # Extracted Live2D asset copies. The model is NOT redistributable
 # (.vtube.json has "WorkshopSharingForbidden": true), so it must never be committed.
@@ -38,3 +55,8 @@ local.properties
 /shots/*.png
 !/shots/.gitkeep
 /.tmp_probe
+
+# Release signing material
+*.jks
+*.keystore
+keystore.properties

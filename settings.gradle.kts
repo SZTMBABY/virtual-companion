@@ -19,8 +19,6 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // Vendored AARs (sherpa-onnx is not on Maven Central; JitPack mirror is unreliable offline)
-        flatDir { dirs("app/libs") }
     }
 }
 
