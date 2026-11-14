@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  网络策略。
+
+  为什么必须放开明文 HTTP：
+  需求 1 是「兼容 OpenAI 协议的 API」，而用户最常用的自建/本地端点
+  （Ollama :11434、one-api / new-api、LM Studio、局域网内网服务）一律是 http://。
+  Android 9(API 28) 起默认禁止明文，不放开的话填 http 地址会直接抛
+  `CLEARTEXT communication to ... not permitted by network security policy`。
+
+  为什么仍用 network_security_config 而不是 android:usesCleartextTraffic="true"：
+  后者是全局布尔量，没法收紧；这里用 base-config 表达同样的「默认允许」，
+  但把系统信任锚点显式写出来，将来要按域名白名单收紧只需改这一份 XML，
+  不用动 Manifest。
+
+  注意：本 App 会把用户填的 API Key 通过明文发出（如果用户填的是 http）。
+  设置页与 README 都提示「公网端点请用 https」。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

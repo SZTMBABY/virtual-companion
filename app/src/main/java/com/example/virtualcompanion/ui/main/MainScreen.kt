@@ -303,7 +303,7 @@ private fun SmallTextButton(text: String, onClick: () -> Unit) {
 }
 
 /**
- * 主界面状态。p1 阶段只有静态值 + 骨架占位回复。
+ * 主界面状态。
  */
 data class MainUiState(
     val hasModel: Boolean = false,
@@ -318,4 +318,6 @@ data class MainUiState(
     /** 半身构图：只留头部与上半身，小屏上脸更大。 */
     val halfBody: Boolean = false,
     val halfBodyRatio: Float = 0.48f,
+    /** 当前情绪（neutral/happy/shy/sad/angry/surprised），驱动气泡与表情。 */
+    val emotion: String = "neutral",
 )
