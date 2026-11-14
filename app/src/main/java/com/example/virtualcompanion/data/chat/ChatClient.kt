@@ -471,10 +471,18 @@ object PromptBuilder {
         }
         picked.reverse()
 
-        val out = ArrayList<ChatMessage>(picked.size + 3)
+        // 称呼这种「随时会变、且历史里全是旧值」的运行时事实，光写在 system 开头不够用：
+        // 实测历史里连着几轮「阿森」之后，即使 system 写的是「主人」，模型仍照抄历史。
+        // 所以紧贴用户输入再补一条 system 提醒 —— 离得最近的指令遵守率最高。
+        val address = ChatMessage.system(
+            "（提醒：他现在的称呼是「${persona.displayName}」。历史对话里出现过的其他叫法都已作废。）",
+        )
+
+        val out = ArrayList<ChatMessage>(picked.size + 4)
         out += system
         memory?.let { out += it }
         out += picked
+        out += address
         out += user
         return out
     }
