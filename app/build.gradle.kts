@@ -39,6 +39,8 @@ android {
     }
     buildFeatures {
         compose = true
+        // p3：KWS 离线自检走 BuildConfig.DEBUG 分支，AGP 8+ 默认不生成该类
+        buildConfig = true
     }
     androidResources {
         // Live2D moc3/physics/onnx must stay byte-exact; do not let AGP re-compress them.

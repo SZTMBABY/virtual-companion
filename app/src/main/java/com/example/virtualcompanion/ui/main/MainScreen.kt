@@ -102,8 +102,23 @@ fun MainScreen(
                 .padding(horizontal = 10.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            AnimatedVisibility(visible = bot.isNotBlank(), enter = fadeIn(), exit = fadeOut()) {
-                SubtitleBubble(text = bot, speaking = state.isSpeaking)
+            // 「在听」时优先显示识别中的半句，否则显示角色台词。
+            val subtitle = when {
+                state.voiceState == "AWAKE" && state.partialText.isNotBlank() -> state.partialText
+                bot.isNotBlank() -> bot
+                state.voiceState == "AWAKE" -> "我在听……"
+                else -> ""
+            }
+            AnimatedVisibility(
+                visible = subtitle.isNotBlank(),
+                enter = fadeIn(),
+                exit = fadeOut(),
+            ) {
+                SubtitleBubble(
+                    text = subtitle,
+                    speaking = state.isSpeaking,
+                    listening = state.voiceState == "AWAKE",
+                )
             }
 
             InputBar(
@@ -120,6 +135,8 @@ fun MainScreen(
                 onTapMic = onTapMic,
                 modelMissing = !state.hasModel,
                 onImportModel = onImportModel,
+                listening = state.isListening,
+                rms = state.rms,
             )
         }
     }
@@ -177,10 +194,10 @@ private fun Live2DLayer(
 private fun StatusChip(state: MainUiState) {
     val (label, dot) = when {
         state.error != null -> "错误" to Color(0xFFFF6B6B)
-        state.isBusy -> "思考中" to Color(0xFFFFC857)
-        state.isSpeaking -> "说话中" to Color(0xFF4ADE80)
-        state.isListening -> "在听" to Color(0xFF60A5FA)
-        else -> "待机" to Color(0xFF94A3B8)
+        state.voiceState == "THINKING" || state.isBusy -> "思考中" to Color(0xFFFFC857)
+        state.voiceState == "SPEAKING" || state.isSpeaking -> "说话中" to Color(0xFF4ADE80)
+        state.voiceState == "AWAKE" || state.isListening -> "在听" to Color(0xFF60A5FA)
+        else -> "待机 · 叫「${state.wakeWord}」" to Color(0xFF94A3B8)
     }
     Row(
         modifier = Modifier
@@ -199,7 +216,7 @@ private fun StatusChip(state: MainUiState) {
 }
 
 @Composable
-private fun SubtitleBubble(text: String, speaking: Boolean) {
+private fun SubtitleBubble(text: String, speaking: Boolean, listening: Boolean = false) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -207,12 +224,23 @@ private fun SubtitleBubble(text: String, speaking: Boolean) {
             .background(Color(0xCC0A1622))
             .padding(horizontal = 14.dp, vertical = 10.dp),
     ) {
-        Text(
-            text = text,
-            color = Color(0xFFEAF2F8),
-            fontSize = 14.sp,
-            lineHeight = 20.sp,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (listening) {
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF60A5FA)),
+                )
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(
+                text = text,
+                color = if (listening) Color(0xFFBFDBFE) else Color(0xFFEAF2F8),
+                fontSize = 14.sp,
+                lineHeight = 20.sp,
+            )
+        }
     }
 }
 
@@ -225,6 +253,8 @@ private fun InputBar(
     onTapMic: () -> Unit,
     modelMissing: Boolean,
     onImportModel: () -> Unit,
+    listening: Boolean = false,
+    rms: Float = 0f,
 ) {
     Row(
         modifier = Modifier
@@ -257,8 +287,31 @@ private fun InputBar(
             SmallTextButton(text = "导入模型", onClick = onImportModel)
         }
 
-        IconButton(onClick = onTapMic, enabled = enabled, modifier = Modifier.size(36.dp)) {
-            Text("🎤", fontSize = 17.sp)
+        IconButton(
+            onClick = onTapMic,
+            enabled = enabled,
+            modifier = Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(
+                    when {
+                        listening -> Color(0xFF2563EB)
+                        else -> Color.Transparent
+                    },
+                ),
+        ) {
+            if (listening) {
+                // 在听时用能量做个呼吸点，让用户知道麦克风真的在工作
+                val alpha = 0.35f + 0.65f * rms.coerceIn(0f, 1f)
+                Box(
+                    Modifier
+                        .size(12.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF93C5FD).copy(alpha = alpha)),
+                )
+            } else {
+                Text("🎤", fontSize = 17.sp)
+            }
         }
 
         val canSend = input.isNotBlank() && enabled
@@ -320,4 +373,12 @@ data class MainUiState(
     val halfBodyRatio: Float = 0.48f,
     /** 当前情绪（neutral/happy/shy/sad/angry/surprised），驱动气泡与表情。 */
     val emotion: String = "neutral",
+    /** p3：语音状态机。 */
+    val voiceState: String = "IDLE",
+    /** 唤醒词（「小鲸」），用于待机时的提示文案。 */
+    val wakeWord: String = "小鲸",
+    /** 正在边听边出的半句。 */
+    val partialText: String = "",
+    /** 采集到的实时能量（0..1），驱动麦克风呼吸灯。 */
+    val rms: Float = 0f,
 )

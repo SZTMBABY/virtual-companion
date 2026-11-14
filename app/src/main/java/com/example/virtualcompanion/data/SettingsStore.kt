@@ -44,13 +44,21 @@ class SettingsStore(private val context: Context) {
     private fun readJson(key: String): JSONObject? =
         prefs.getString(key, null)?.let { runCatching { JSONObject(it) }.getOrNull() }
 
-    private fun readLlm() = com.example.virtualcompanion.data.model.LlmConfig.fromJson(readJson(KEY_LLM))
-    private fun readTts() = com.example.virtualcompanion.data.model.TtsConfig.fromJson(readJson(KEY_TTS))
-    private fun readTencentAsr() =
-        com.example.virtualcompanion.data.model.TencentAsrConfig.fromJson(readJson(KEY_TENCENT_ASR))
-    private fun readWake() = com.example.virtualcompanion.data.model.WakeConfig.fromJson(readJson(KEY_WAKE))
-    private fun readAsrEngine() = AppSettings.fromJson(readJson(KEY_ROOT)).asrEngine
-    private fun readDisplay() = AppSettings.fromJson(readJson(KEY_ROOT)).display
+    /**
+     * 一份结构、一个读取源：所有字段都从 [KEY_ROOT] 里的嵌套对象取。
+     *
+     * 历史坑：早期 llm/tts/wake 是**并列的顶层 key**，与根 JSON 里的同名嵌套字段各存一份。
+     * 两处一旦不同步（例如外部改了根 JSON），API Key 就会被读成空、界面报「还没有填 API Key」，
+     * 而配置文件里明明有值。现在统一以根 JSON 为准，顶层 key 只写不读（向前兼容旧数据）。
+     */
+    private fun root(): AppSettings = AppSettings.fromJson(readJson(KEY_ROOT))
+
+    private fun readLlm() = root().llm
+    private fun readTts() = root().tts
+    private fun readTencentAsr() = root().tencentAsr
+    private fun readWake() = root().wake
+    private fun readAsrEngine() = root().asrEngine
+    private fun readDisplay() = root().display
     private fun readPersona() = PersonaCard.fromJson(readJson(KEY_PERSONA))
     private fun readCharacter() = CharacterCard.fromJson(readJson(KEY_CHARACTER))
 

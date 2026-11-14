@@ -142,7 +142,7 @@ data class WakeConfig(
     /** 唤醒后连续静默多久退回待机，单位毫秒。用户要求 8 秒。 */
     val silenceTimeoutMs: Long = 8_000L,
     /** KWS 触发阈值，越低越灵敏也越容易误触发。 */
-    val kwsThreshold: Float = 0.35f,
+    val kwsThreshold: Float = 0.15f,
     /** KWS 关键词提权分数。 */
     val kwsBoost: Float = 2.0f,
     /** TTS 播放期间暂停 KWS/ASR（半双工兜底，不依赖 AEC）。 */
