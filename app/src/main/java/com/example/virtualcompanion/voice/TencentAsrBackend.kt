@@ -62,6 +62,17 @@ class TencentAsrBackend(
     override var onFinal: ((String) -> Unit)? = null
     override var onError: ((String) -> Unit)? = null
 
+    /**
+     * 腾讯云 v2 是**服务端 VAD** 判句末（`needvad=1`）：它必须真的听到人声
+     * 之后那段静音，才会吐 `slice_type=2` 的 final。这里之前沿用接口默认的
+     * false，[VoiceEngine] 就把静音帧全裁掉了 —— 服务端等不到句末，final
+     * 永远不回来，表现为「说完话不自动停，等到超时这条消息就没了」。
+     *
+     * 代价只在唤醒态：16k×16bit = 32KB/s，受 `maxAwakeMs`（60 秒）约束，
+     * 单次唤醒最多约 1.9MB，可以接受。
+     */
+    override val needsContinuousAudio: Boolean = true
+
     private var socket: WebSocket? = null
     private val openLatch = CountDownLatch(1)
 
