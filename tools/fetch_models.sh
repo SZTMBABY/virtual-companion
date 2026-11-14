@@ -112,7 +112,7 @@ download_or_die() {
       - 或手动下载后放到 $CACHE_DIR/ 再重跑"
 }
 
-install_verified() { # $1 = 源文件, $2 = 仓内相对路径（校验后原子搬入）
+install_verified() { # $1 = 源文件, $2 = 仓内相对路径（校验后原子拷入；源文件保留，便于缓存复用）
   local src="$1" rel="$2" dest="$ROOT/$2" want have
   want="$(expected_sha "$rel")"
   [ -n "$want" ] || die "tools/models.sha256 里没有 $rel 的校验值"
@@ -124,7 +124,9 @@ install_verified() { # $1 = 源文件, $2 = 仓内相对路径（校验后原子
      下载内容与清单不符（上游可能更新了模型），已中止，未写入任何文件。"
   fi
   mkdir -p "$(dirname "$dest")"
-  mv -f "$src" "$dest"
+  # 先写临时名再改名，避免中途失败留下半截文件。用 cp 而不是 mv，
+  # 这样 $CACHE_DIR 里的下载件可以给下一次构建复用。
+  cp -f "$src" "$dest.part" && mv -f "$dest.part" "$dest"
   info "ok $rel"
 }
 
