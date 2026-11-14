@@ -3,6 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Android-8.0%2B%20(arm64--v8a)-3ddc84.svg)](#getting-started)
 [![Engine](https://img.shields.io/badge/ASR%20%2F%20KWS-sherpa--onnx-blue.svg)](https://github.com/k2-fsa/sherpa-onnx)
+[![Android CI](https://github.com/SZTMBABY/virtual-companion/actions/workflows/android.yml/badge.svg)](https://github.com/SZTMBABY/virtual-companion/actions/workflows/android.yml)
 
 A voice companion that runs on Android: say “小鲸” (Xiao Jing) to wake it, talk to
 it with your voice, and it answers as a Live2D character that remembers things you

@@ -3,6 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Android-8.0%2B%20(arm64--v8a)-3ddc84.svg)](#快速开始)
 [![Engine](https://img.shields.io/badge/ASR%20%2F%20KWS-sherpa--onnx-blue.svg)](https://github.com/k2-fsa/sherpa-onnx)
+[![Android CI](https://github.com/SZTMBABY/virtual-companion/actions/workflows/android.yml/badge.svg)](https://github.com/SZTMBABY/virtual-companion/actions/workflows/android.yml)
 
 一个跑在 Android 上的语音虚拟伴侣：喊一声「小鲸」就能唤醒，用语音聊天，
 对面是一个 Live2D 角色，记得住很久以前说过的事。
