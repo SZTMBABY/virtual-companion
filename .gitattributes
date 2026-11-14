@@ -1,0 +1,21 @@
+# Normalize line endings on checkout so shell scripts and Gradle files behave the
+# same on Windows, macOS and Linux.
+* text=auto
+
+# Shell scripts must be LF, otherwise bash on Windows/macOS chokes on \r.
+*.sh    text eol=lf
+*.bash  text eol=lf
+gradlew text eol=lf
+
+# Windows batch files must stay CRLF.
+*.bat   text eol=crlf
+
+# Binary assets: never touch.
+*.png  binary
+*.jpg  binary
+*.webp binary
+*.onnx binary
+*.aar  binary
+*.jar  binary
+*.wav  binary
+*.moc3 binary
