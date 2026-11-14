@@ -102,6 +102,21 @@ class VoiceEngine(
     private var config = WakeConfig()
     private var preferredEngine = AsrEngine.CLOUD_TENCENT
     private var running = false
+
+    /**
+     * 启动协程还没走完（KWS 模型 4–6 秒）。
+     *
+     * 为什么要这个标记：`running = true` 是**同步**置的，但真正的开麦在后台协程里。
+     * 这段时间里如果再来一次 `start()`（ON_START 与 LaunchedEffect 同时触发、
+     * 或用户连点麦克风），`if (running)` 分支会走 `reopenMicIfNeeded()` 把
+     * AudioRecord 先打开，随后第一个协程加载完模型又开一次 → 两个 AudioRecord
+     * 抢同一路麦克风。真机日志：
+     *   Long monitor contention ... in KwsEngine.setWakeWord(...) for 6.050s
+     *   E VoiceEngine: capture error: AudioRecord 初始化失败：state=0 source=1
+     * 之后唤醒彻底失效，只能杀进程。
+     */
+    @Volatile
+    private var starting = false
     private var silenceJob: Job? = null
 
     /**
@@ -240,12 +255,18 @@ class VoiceEngine(
 
     fun start() {
         if (running) {
+            // 启动还没走完时绝不能去开麦：见 [starting] 的注释。
+            if (starting) {
+                Log.i(TAG, "start() ignored: still starting")
+                return
+            }
             // 已经启动过但麦克风死了（退到后台被杀 / 被别的 App 抢占）。
             // 直接 return 会让「再点一次麦克风」变成空操作。
             reopenMicIfNeeded()
             return
         }
         running = true
+        starting = true
 
         // 模型加载 + 开麦必须在后台线程：KWS 的 5.4MB onnx 首次解析约 4–6 秒，
         // 放在主线程会让 FocusEvent 派发超时，直接触发系统 ANR 弹窗（实测踩过）。
@@ -262,6 +283,7 @@ class VoiceEngine(
                     _ui.value = _ui.value.copy(state = State.ERROR, message = "唤醒模型加载失败")
                     Log.e(TAG, "kws load failed")
                     running = false
+                    starting = false
                     return@launch
                 }
             }
@@ -271,6 +293,7 @@ class VoiceEngine(
             })
             if (!ok) {
                 running = false
+                starting = false
                 kws.release()
                 return@launch
             }
@@ -305,6 +328,7 @@ class VoiceEngine(
                 Log.i(TAG, "local asr warmup skipped (cloud is primary, lazy-load on fallback)")
             }
 
+            starting = false
             _ui.value = _ui.value.copy(state = State.IDLE, message = "", ready = true)
         }
     }

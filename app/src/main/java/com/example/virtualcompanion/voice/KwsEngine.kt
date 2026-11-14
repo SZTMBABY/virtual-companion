@@ -57,8 +57,34 @@ class KwsEngine(private val assets: AssetManager) {
         const val DEFAULT_WAKE_WORD = "小鲸"
     }
 
+    // 三把锁分开，是修一个真机坑：原来全类一把 @Synchronized 锁，
+    // load() 要在里面初始化 5.4MB 的 onnx（4–6 秒），这期间 setWakeWord 只能干等。
+    // 真机日志：
+    //   Long monitor contention with owner ... at KwsEngine.load(...) waiters=0
+    //   in KwsEngine.setWakeWord(String, float) for 6.050s
+    // 结果唤醒词切换被拖 6 秒、start() 迟迟不完成，紧接着麦克风也打不开。
+    //
+    // 现在拆成两把（加锁顺序恒为 loadLock → decodeLock，不会成环）：
+    //   loadLock   —— 只管模型的建/毁（慢，但只有 load/release 会碰）
+    //   decodeLock —— 既管 decode，也管 stream 的换入换出与释放
+    //                 （KeywordSpotter 内部非线程安全；而且旧流必须在没有任何
+    //                 in-flight decode 时才能 release，否则 use-after-free）
+    @Volatile
     private var spotter: KeywordSpotter? = null
+    @Volatile
     private var stream: OnlineStream? = null
+    private val loadLock = Any()
+    /**
+     * 换 stream 与 decode 必须互斥 —— 这是本轮补的第二个坑。
+     *
+     * 拆锁后 feed 走 decodeLock、setWakeWord 走 swap 锁，看起来互不干扰，
+     * 但 `old.release()` 会释放 decode 线程正在用的 OnlineStream：先 free 再 decode
+     * 就是 use-after-free（历史表现是 `Fatal signal 11 (SIGSEGV)` in
+     * `Java_com_k2fsa_sherpa_onnx_KeywordSpotter_decode`）。
+     * 所以换流+释放旧流整段都放进 decodeLock 里，保证没有 in-flight decode。
+     * 加锁顺序恒为 loadLock → decodeLock，无环。
+     */
+    private val decodeLock = Any()
 
     /** 汉字 → 拼音 token（lazy 读 assets/kws/pinyin.tsv，只有 210KB） */
     private val pinyinTable: Map<Char, String> by lazy {
@@ -78,6 +104,7 @@ class KwsEngine(private val assets: AssetManager) {
     }
 
     /** 当前生效的唤醒词（显示文本） */
+    @Volatile
     var wakeWord: String = DEFAULT_WAKE_WORD
 
     /** 当前生效的关键词行（`<拼音 tokens> :<boost> @<显示文本>`） */
@@ -109,7 +136,6 @@ class KwsEngine(private val assets: AssetManager) {
      *
      * @return true 表示换成功；false 表示有字不支持，保持原词不变。
      */
-    @Synchronized
     fun setWakeWord(word: String, boost: Float = 2.0f): Boolean {
         val clean = word.trim()
         val py = toPinyin(clean) ?: run {
@@ -124,12 +150,18 @@ class KwsEngine(private val assets: AssetManager) {
         }
         return try {
             val line = "$py :$boost @$clean"
+            // createStream 本身不慢；只有换指针和释放旧流需要互斥。
+            // 注意：旧流必须先换下来再 release —— 释放时如果 decode 线程正持有它，
+            // 会直接 SIGSEGV，所以释放放在锁外、且只在指针已换掉之后。
             val ns = s.createStream(line)
-            try {
-                stream?.release()
-            } catch (_: Throwable) {
+            synchronized(decodeLock) {
+                val o = stream
+                stream = ns
+                try {
+                    o?.release()
+                } catch (_: Throwable) {
+                }
             }
-            stream = ns
             wakeWord = clean
             keywordsLine = line
             Log.i(TAG, "wake word → '$clean' ($py)")
@@ -154,11 +186,17 @@ class KwsEngine(private val assets: AssetManager) {
     var lastRawKeyword = ""
         private set
 
-    @Synchronized
     fun load(
         threshold: Float = 0.15f,
         boost: Float = 2.0f,
         keywordsAsset: String = ASSET_KEYWORDS,
+    ): Boolean = synchronized(loadLock) { loadLocked(threshold, boost, keywordsAsset) }
+
+    /** [load] 的实际实现。调用者必须已持有 [loadLock]。 */
+    private fun loadLocked(
+        threshold: Float,
+        boost: Float,
+        keywordsAsset: String,
     ): Boolean {
         if (spotter != null) return true
         return try {
@@ -187,8 +225,11 @@ class KwsEngine(private val assets: AssetManager) {
             val s = KeywordSpotter(assetManager = assets, config = config)
             spotter = s
             // 优先用内存里的唤醒词（设置页可能已经改过），没有再退回 assets 里的默认词。
+            // 注意 setWakeWord 可能在模型还没建好时就被调用过，它只记下 keywordsLine；
+            // 这里再读一次，保证「先改词、后加载」也能生效。
             val line = keywordsLine
-            stream = if (line.isNotBlank()) s.createStream(line) else s.createStream()
+            val st = if (line.isNotBlank()) s.createStream(line) else s.createStream()
+            synchronized(decodeLock) { stream = st }
             Log.i(TAG, "loaded encoder=$ASSET_ENCODER keywords=$keywordsAsset " +
                 "wakeWord=$wakeWord threshold=$threshold boost=$boost")
             true
@@ -203,8 +244,10 @@ class KwsEngine(private val assets: AssetManager) {
      * 喂一帧 16kHz float PCM。
      * @return 命中的唤醒词显示文本，未命中返回 null。
      */
-    @Synchronized
-    fun feed(samples: FloatArray): String? {
+    fun feed(samples: FloatArray): String? = synchronized(decodeLock) { feedLocked(samples) }
+
+    /** [feed] 的实际实现。调用者必须已持有 [decodeLock]。 */
+    private fun feedLocked(samples: FloatArray): String? {
         val s = spotter ?: return null
         val st = stream ?: return null
         lastDecodeCount = 0
@@ -240,8 +283,7 @@ class KwsEngine(private val assets: AssetManager) {
     }
 
     /** 唤醒后从「听关键词」切到「听整句」时要清空内部状态，避免上一句的尾巴串进来。 */
-    @Synchronized
-    fun reset() {
+    fun reset() = synchronized(decodeLock) {
         try {
             stream?.let { spotter?.reset(it) }
         } catch (_: Throwable) {
@@ -250,13 +292,16 @@ class KwsEngine(private val assets: AssetManager) {
 
     val hits: Int get() = hitCount
 
-    @Synchronized
-    fun release() {
-        try {
-            stream?.release()
-        } catch (_: Throwable) {
+    fun release() = synchronized(loadLock) {
+        // 先原子换出指针再释放：setWakeWord / feed 线程可能正拿着旧的 stream。
+        synchronized(decodeLock) {
+            val o = stream
+            stream = null
+            try {
+                o?.release()
+            } catch (_: Throwable) {
+            }
         }
-        stream = null
         try {
             spotter?.release()
         } catch (_: Throwable) {
