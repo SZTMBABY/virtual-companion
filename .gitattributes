@@ -1,6 +1,7 @@
 # Normalize line endings on checkout so shell scripts and Gradle files behave the
-# same on Windows, macOS and Linux.
-* text=auto
+# same on Windows, macOS and Linux. Everything is stored and checked out as LF;
+# Windows batch files are the only exception.
+* text=auto eol=lf
 
 # Shell scripts must be LF, otherwise bash on Windows/macOS chokes on \r.
 *.sh    text eol=lf
