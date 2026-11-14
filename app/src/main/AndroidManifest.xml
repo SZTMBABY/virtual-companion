@@ -9,6 +9,10 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="true" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -18,18 +22,19 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.VirtualCompanion">
-        <activity
-            android:name=".ProbeActivity"
-            android:exported="true"
-            android:theme="@style/Theme.VirtualCompanion" />
-        <activity
-            android:name=".AudioProbeActivity"
-            android:exported="true"
-            android:theme="@style/Theme.VirtualCompanion" />
+
+        <!-- fullUser: follow the gravity sensor, but never upside-down (device reports
+             mAllowAllRotations=false, so 180 is not usable anyway).
+             configChanges: keep the single Activity alive across rotation so the
+             WebView / GL state is not torn down; the Live2D layer re-lays-out itself. -->
         <activity
             android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density"
             android:exported="true"
             android:label="@string/app_name"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
+            android:screenOrientation="fullUser"
             android:theme="@style/Theme.VirtualCompanion"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
