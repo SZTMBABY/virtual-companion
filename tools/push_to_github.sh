@@ -105,8 +105,18 @@ fi
 say "推送"
 # gh repo create --push 通常已经推过一次；这里再推一次以覆盖「仓库已存在」的情况。
 if ! run git push -u origin "$BRANCH"; then
-  info "git push 失败：确认已运行 gh auth setup-git，或手动 git push -u origin $BRANCH"
-  exit 1
+  # Windows 上 gh auth login 写入的 credential helper 是 "!\"C:\\Program Files\\...\\gh.exe\""，
+  # Git for Windows 的 sh 执行不了反斜杠路径，会报 "failed to execute prompt script"。
+  # 换成正斜杠版本（仅写入本仓库 .git/config，不进入提交）再试一次。
+  gh_bin="$(command -v gh 2>/dev/null || true)"
+  if [ -n "$gh_bin" ]; then
+    info "重试：用 '${gh_bin}' 作为 git credential helper"
+    run git config --local credential.https://github.com.helper "!\"$gh_bin\" auth git-credential"
+    run git push -u origin "$BRANCH"
+  else
+    info "git push 失败：确认已运行 gh auth setup-git，或手动 git push -u origin $BRANCH"
+    exit 1
+  fi
 fi
 
 # ---------------------------------------------------------------------------
