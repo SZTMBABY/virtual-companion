@@ -375,6 +375,9 @@ object PromptBuilder {
      *    而记忆层已经把更早的内容折叠成摘要了。
      *
      * `historyWindow` 仍然生效，作为「条数」硬上限，防止一堆超短消息把预算占满。
+     * 它与 `keepRounds`（记忆折叠边界）是**两个独立数字**：
+     * - `keepMessages`（= keepRounds × 2）由上层在调用前截好 history 传进来，决定「记得多久」；
+     * - `historyWindow` 在这里再兜一层，纯粹是成本守卫，决定「一次最多发几条」。
      */
     fun buildMessages(
         persona: PersonaCard,
@@ -401,7 +404,7 @@ object PromptBuilder {
             (memory?.let { TokenEstimator.estimate(it.content) } ?: 0) +
             TokenEstimator.estimate(user.content)
 
-        val window = settings.llm.historyWindow.coerceIn(2, 100)
+        val window = settings.llm.historyWindow.coerceIn(2, 200)
         val picked = ArrayList<ChatMessage>(window)
         for (m in history.takeLast(window).asReversed()) {
             val cost = TokenEstimator.estimate(m.content) + TokenEstimator.PER_MESSAGE_OVERHEAD

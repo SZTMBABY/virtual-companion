@@ -12,8 +12,23 @@ data class LlmConfig(
     val temperature: Float = 0.85f,
     /** 单次回复的 token 上限，伴侣对话不需要太长。 */
     val maxTokens: Int = 512,
-    /** 送进上下文的历史消息条数上限（滑窗），记忆层再额外注入摘要。 */
-    val historyWindow: Int = 20,
+    /**
+     * 单次请求最多带多少条原文历史（**纯成本守卫**，与记忆折叠无关）。
+     *
+     * 只挡「一堆超短消息把预算占满又没信息量」这种情况；
+     * 真正决定「记得多久」的是 [keepRounds]。
+     * 拆开的原因见 docs/施工日志.md 的 p5-7 节：合成一个数字时，
+     * 用户改大它以为是「记得更久」，实际同时改变了折叠频率和块碎片化程度。
+     */
+    val historyWindow: Int = 40,
+    /**
+     * 保留最近多少**轮**原文不折叠（1 轮 = 你一问 + 她一答 = 2 条消息）。
+     *
+     * 这是记忆层「原文 / 摘要」的分界线：这 N 轮原样进 wire，
+     * 更早的由 [com.example.virtualcompanion.data.memory.MemoryStore] 折叠成摘要。
+     * 存储用条数，所以内部换算成 [keepMessages]。
+     */
+    val keepRounds: Int = 10,
     /**
      * 上下文窗口大小（token）。用来估算「还能塞多少历史」，
      * 而不是只按条数切——长短消息混在一起时条数完全不代表体积。
@@ -57,6 +72,9 @@ data class LlmConfig(
 
     val isConfigured: Boolean get() = apiKey.isNotBlank()
 
+    /** 把「保留轮数」换算成消息条数（一轮 = 一问 + 一答）。 */
+    val keepMessages: Int get() = (keepRounds.coerceIn(1, 200) * 2)
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("baseUrl", baseUrl)
         put("apiKey", apiKey)
@@ -64,6 +82,7 @@ data class LlmConfig(
         put("temperature", temperature.toDouble())
         put("maxTokens", maxTokens)
         put("historyWindow", historyWindow)
+        put("keepRounds", keepRounds)
         put("contextWindow", contextWindow)
         put("reasoningEffort", reasoningEffort)
     }
@@ -79,6 +98,8 @@ data class LlmConfig(
                 temperature = o.optDouble("temperature", d.temperature.toDouble()).toFloat(),
                 maxTokens = o.optInt("maxTokens", d.maxTokens),
                 historyWindow = o.optInt("historyWindow", d.historyWindow),
+                // 老数据没有 keepRounds：用旧的 historyWindow 反推，避免升级后记忆突然变短
+                keepRounds = o.optInt("keepRounds", (o.optInt("historyWindow", d.keepRounds * 2) / 2).coerceIn(1, 200)),
                 contextWindow = o.optInt("contextWindow", d.contextWindow),
                 reasoningEffort = o.optString("reasoningEffort", d.reasoningEffort),
             )

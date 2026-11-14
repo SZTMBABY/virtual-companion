@@ -197,18 +197,20 @@ class MainActivity : ComponentActivity() {
             runCatching {
                 // 折叠触发有两个条件，满足任一就折：
                 //
-                // ① 条数：未折叠的消息比「保留窗口 + 一整块」还多。这条保证了块不会碎成一条一条，
-                //    也不会因为把上下文窗口调成 1M 就永远不折叠——窗口再大，wire 里也只该有
-                //    historyWindow + BLOCK_SPAN 条原文，其余靠摘要承载。
-                // ② token：超过可用预算的 60%。长消息场景下条数完全不代表体积，
-                //    单靠 ① 会让几条超长消息把窗口顶爆。
-                val keep = settings.llm.historyWindow
+                // ① 条数：未折叠的消息比「保留窗口 + 一整块」还多。
+                //    这条保证块不会碎成一条一条，也不会因为把上下文窗口调成 1M 就永远不折叠。
+                //    注意这里的保留窗口是 keepMessages（= keepRounds × 2），
+                //    与「单次请求最多带几条」的 historyWindow 已经不是同一个数字了。
+                // ② token：超过可用预算的 85%。长消息场景下条数完全不代表体积，
+                //    单靠 ① 会让几条超长消息把窗口顶爆。阈值从 60% 提到 85% 的理由：
+                //    1M 窗口下 60% ≈ 629K 永远不触发，8K 窗口下 60% 又折得太勤。
+                val keep = settings.llm.keepMessages
                 val liveCount = container.memory.recent(keep + MemoryStore.BLOCK_SPAN).size
                 val tooMany = liveCount > keep + MemoryStore.BLOCK_SPAN - 1
 
                 val budget = (settings.llm.contextWindow - settings.llm.maxTokens)
                     .coerceAtLeast(512)
-                val threshold = (budget * 3) / 5
+                val threshold = (budget * 85) / 100
                 val used = TokenEstimator.estimate(
                     container.memory.recent(keep).let { MemoryMigration.toChatMessages(it) },
                 )
@@ -216,15 +218,24 @@ class MainActivity : ComponentActivity() {
                 if (BuildConfig.DEBUG) {
                     android.util.Log.i(
                         "Memory",
-                        "fold trigger live=$liveCount tokens=$used threshold=$threshold",
+                        "fold trigger live=$liveCount keep=$keep tokens=$used threshold=$threshold",
                     )
                 }
-                container.memory.foldOnce(keepRecent = settings.llm.historyWindow) { batch ->
-                    // 摘要由「上层」生成是内核契约；离线时用纯文本拼接兜底，
-                    // 不引入额外的模型调用（会把每条回复的延迟翻倍）。
-                    batch.joinToString("；") { m ->
-                        val who = if (m.role == "user") "主人" else "小鲸"
-                        "$who：${m.text.take(60)}"
+                // 循环折到「剩 keep 条」为止：foldOnce 每次最多折 BLOCK_SPAN 条，
+                // 只调一次的话 token 阈值触发的场景会折出 2~3 条的碎块，
+                // 5 个碎块合起来远不足 40 条，T1→T2 的压缩率就完全不可控了。
+                var guard = 0
+                while (container.memory.recent(keep + MemoryStore.BLOCK_SPAN).size > keep && guard++ < 16) {
+                    val made = container.memory.foldOnce(keepRecent = keep) { batch ->
+                        // 摘要由「上层」生成是内核契约；这里先用纯文本拼接兜底，
+                        // 不额外引入模型调用（会让每条回复的延迟翻倍）。
+                        batch.joinToString("；") { m ->
+                            val who = if (m.role == "user") "主人" else "小鲸"
+                            "$who：${m.text.take(60)}"
+                        }
+                    } ?: break
+                    if (BuildConfig.DEBUG) {
+                        android.util.Log.i("Memory", "folded block#${made.id} ${made.startRef}..${made.endRef}")
                     }
                 }
                 // 同层积满 4 块就升到上一层：T1→T2→T3，与 billion-context 的三层同构。
@@ -273,7 +284,7 @@ class MainActivity : ComponentActivity() {
                 }
                 // 排除刚落的这一条：buildMessages 末尾还会再追加 userInput，
                 // 不去掉就会把当前这句发两遍（实测模型会开始抱怨「复读机」）。
-                val history = container.memory.recent(settings.llm.historyWindow + 1)
+                val history = container.memory.recent(settings.llm.keepMessages + 1)
                     .filterNot { it.ref == currentRef }
                     .let { MemoryMigration.toChatMessages(it) }
                 val messages = PromptBuilder.buildMessages(

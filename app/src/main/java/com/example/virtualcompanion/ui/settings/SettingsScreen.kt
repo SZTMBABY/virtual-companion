@@ -290,17 +290,6 @@ fun SettingsScreen(
                 // 上下文窗口：决定「还能塞多少历史」，也决定记忆折叠何时触发。
                 // 按条数切在长短消息混排时会失真，所以这里让用户按自己模型的真实窗口调。
                 // 先给预设（点一下即填），下面仍保留输入框手填——预设覆盖不到就自己打。
-                TextFieldRow(
-                    label = "历史条数上限",
-                    value = settings.llm.historyWindow.toString(),
-                    placeholder = "20",
-                    onCommit = { v ->
-                        val n = v.trim().toIntOrNull()
-                        if (n != null && n in 2..100) {
-                            onSettingsChange { it.copy(llm = it.llm.copy(historyWindow = n)) }
-                        }
-                    },
-                )
                 LabeledChips(
                     label = "上下文窗口（token）",
                     hint = "点一下即填，也可以在下面手填",
@@ -339,10 +328,57 @@ fun SettingsScreen(
                     },
                 )
                 Text(
-                    text = "除回复预留 ${settings.llm.maxTokens} token 外，历史约 ${settings.llm.historyWindow} 条。" +
+                    text = "除回复预留 ${settings.llm.maxTokens} token 外，" +
+                        "历史约 ${settings.llm.keepMessages} 条。" +
                         "拉取模型列表会自动把窗口填成该模型的真实值。",
                     color = Color(0xFF5E7A91),
                     fontSize = 11.sp,
+                )
+            }
+
+            // ---- 开发 ----
+            // 这两个数字只影响「记忆粒度」和「单次开销」，绝大多数用户不该动。
+            // 跟大模型配置放在一起会让设置页看起来复杂（用户 m04034：
+            // 「入口放到开发这个设置里面去，正常按默认来」），所以单独收进这一组、默认收起。
+            Section(
+                title = "开发 / 高级",
+                summary = "保留 ${settings.llm.keepRounds} 轮 · 单次最多 ${settings.llm.historyWindow} 条",
+            ) {
+                TextFieldRow(
+                    label = "保留最近多少轮（记忆边界）",
+                    value = settings.llm.keepRounds.toString(),
+                    placeholder = "10",
+                    onCommit = { v ->
+                        val n = v.trim().toIntOrNull()
+                        if (n != null && n in 1..200) {
+                            onSettingsChange { it.copy(llm = it.llm.copy(keepRounds = n)) }
+                        }
+                    },
+                )
+                Text(
+                    text = "这 ${settings.llm.keepRounds} 轮（${settings.llm.keepMessages} 条）原样送进模型，" +
+                        "更早的由记忆层折叠成摘要。调大 = 记得更久，但请求更慢更贵。",
+                    color = Color(0xFF5E7A91),
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                )
+                TextFieldRow(
+                    label = "单次最多带多少条（成本守卫）",
+                    value = settings.llm.historyWindow.toString(),
+                    placeholder = "40",
+                    onCommit = { v ->
+                        val n = v.trim().toIntOrNull()
+                        if (n != null && n in 2..200) {
+                            onSettingsChange { it.copy(llm = it.llm.copy(historyWindow = n)) }
+                        }
+                    },
+                )
+                Text(
+                    text = "只挡「一堆超短消息占满预算」，与折叠无关。" +
+                        "真正能带多少还受上面的上下文窗口限制，两者谁先到就按谁截。",
+                    color = Color(0xFF5E7A91),
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
                 )
             }
 
