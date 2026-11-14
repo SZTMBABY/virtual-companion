@@ -398,7 +398,8 @@ fun SettingsScreen(
 
             // ---- 角色 ----
             Section(
-                title = "角色卡（小鲸）",
+                // 标题里的名字也要跟着走 —— 写死「小鲸」同样是「两处名字」的坑。
+                title = "角色卡（${character.name.ifBlank { "未命名" }}）",
                 snapshot = character,
                 onSave = { onSaveSection("角色卡") },
                 summary = "${character.name.ifBlank { "未命名" }} · 唤醒词「${character.wakeWord.ifBlank { "未设置" }}」",
@@ -407,8 +408,79 @@ fun SettingsScreen(
                     label = "名字",
                     value = character.name,
                     placeholder = "小鲸",
-                    onCommit = { v -> onCharacterChange { it.copy(name = v) } },
+                    // 改名时把正文里写死的旧名字一起换掉，否则「字段里叫 A、人设里写着 B」。
+                    onCommit = { v ->
+                        val old = character.name.trim()
+                        val fresh = v.trim()
+                        onCharacterChange { card ->
+                            if (old.isEmpty() || fresh.isEmpty() || old == fresh) {
+                                card.copy(name = fresh)
+                            } else {
+                                fun swap(text: String) = text.replace(old, fresh)
+                                card.copy(
+                                    name = fresh,
+                                    description = swap(card.description),
+                                    personality = swap(card.personality),
+                                    scenario = swap(card.scenario),
+                                    firstMessage = swap(card.firstMessage),
+                                    exampleDialogue = swap(card.exampleDialogue),
+                                    systemPromptExtra = swap(card.systemPromptExtra),
+                                )
+                            }
+                        }
+                    },
                 )
+                Text(
+                    "正文里写 {{char}} 代指她、{{user}} 代指你；用占位符的话，改名不用回头改正文。",
+                    color = Color(0xFF6E93AD),
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                )
+                // 「名字字段」和「正文里手写的名字」是两份数据，改名后就会打架。
+                // 这里只做检测 + 一键统一，不自动改用户正文（人设是人家自己写的）。
+                val mismatched = remember(character, persona) {
+                    val texts = listOf(
+                        character.description, character.personality, character.scenario,
+                        character.firstMessage, character.exampleDialogue, character.systemPromptExtra,
+                    ).joinToString("\n")
+                    val current = character.name.trim()
+                    val userCall = persona.displayName.trim()
+                    Regex("「([^」\\n]{2,6})」").findAll(texts)
+                        .map { it.groupValues[1].trim() }
+                        .filter { it.isNotEmpty() && it != current && it != userCall }
+                        .groupingBy { it }.eachCount()
+                        .entries.sortedByDescending { it.value }
+                        .map { it.key }
+                        .take(2)
+                }
+                if (mismatched.isNotEmpty()) {
+                    Text(
+                        "正文里还写着「${mismatched.joinToString("」「")}」，和上面这个名字对不上。",
+                        color = Color(0xFFE0B25F),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                    )
+                    mismatched.forEach { stale ->
+                        Text(
+                            "把正文里的「$stale」都改成「${character.name.ifBlank { "未命名" }}」",
+                            color = Color(0xFF7FB2D6),
+                            fontSize = 11.sp,
+                            modifier = Modifier.clickable {
+                                onCharacterChange { card ->
+                                    fun swap(text: String) = text.replace(stale, card.name.trim())
+                                    card.copy(
+                                        description = swap(card.description),
+                                        personality = swap(card.personality),
+                                        scenario = swap(card.scenario),
+                                        firstMessage = swap(card.firstMessage),
+                                        exampleDialogue = swap(card.exampleDialogue),
+                                        systemPromptExtra = swap(card.systemPromptExtra),
+                                    )
+                                }
+                            },
+                        )
+                    }
+                }
                 TextFieldRow(
                     label = "唤醒词",
                     value = character.wakeWord,

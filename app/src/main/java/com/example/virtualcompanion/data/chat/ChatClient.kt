@@ -366,23 +366,39 @@ class ChatClient(
  */
 object PromptBuilder {
 
+    /**
+     * 把角色卡正文里的占位符换成实际名字。
+     *
+     * 为什么需要：名字在**两处**出现 —— `CharacterCard.name` 字段，以及人设正文里
+     * 手写的「你是「小鲸」…」。用户改了字段，正文里的旧名字不会跟着变，
+     * 两条信息就打架（实机反馈：「既在字段里指定名字，又在人设里指定名字，改起来不是对冲了吗」）。
+     *
+     * 单一口径的做法是正文写 `{{char}}` / `{{user}}`，拼提示词时现替换。
+     * 兼容大小写与全角括号，避免用户写成 `{{Char}}` 就失效。
+     */
+    private fun fillNames(text: String, charName: String, userName: String): String =
+        text.replace("{{char}}", charName).replace("{{Char}}", charName).replace("{{CHAR}}", charName)
+            .replace("{{user}}", userName).replace("{{User}}", userName).replace("{{USER}}", userName)
+
     fun systemPrompt(persona: PersonaCard, character: CharacterCard, settings: AppSettings): String = buildString {
-        appendLine("你现在扮演一个虚拟伴侣角色，名字叫「${character.name}」。")
+        val charName = character.name.ifBlank { "小鲸" }
+        val userName = persona.displayName
+        appendLine("你现在扮演一个虚拟伴侣角色，名字叫「$charName」。")
         appendLine()
         appendLine("# 你的角色设定")
         if (character.description.isNotBlank()) {
-            appendLine(character.description.trim())
+            appendLine(fillNames(character.description.trim(), charName, userName))
         }
         if (character.personality.isNotBlank()) {
-            appendLine("性格：${character.personality.trim()}")
+            appendLine("性格：" + fillNames(character.personality.trim(), charName, userName))
         }
         if (character.scenario.isNotBlank()) {
-            appendLine("当前场景：${character.scenario.trim()}")
+            appendLine("当前场景：" + fillNames(character.scenario.trim(), charName, userName))
         }
         if (character.exampleDialogue.isNotBlank()) {
             appendLine()
             appendLine("# 说话风格示例")
-            appendLine(character.exampleDialogue.trim())
+            appendLine(fillNames(character.exampleDialogue.trim(), charName, userName))
         }
 
         appendLine()
@@ -403,7 +419,7 @@ object PromptBuilder {
         if (character.systemPromptExtra.isNotBlank()) {
             appendLine()
             appendLine("# 补充要求")
-            appendLine(character.systemPromptExtra.trim())
+            appendLine(fillNames(character.systemPromptExtra.trim(), charName, userName))
         }
 
         appendLine()
