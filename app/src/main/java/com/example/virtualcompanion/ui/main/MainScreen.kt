@@ -14,8 +14,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -83,6 +85,9 @@ fun MainScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                // 沉到状态栏下面：Android 15+ 强制 edge-to-edge，
+                // 不加这行状态芯片会被系统时钟/信号图标压住（实机截图确认过）。
+                .statusBarsPadding()
                 .padding(horizontal = 12.dp, vertical = 8.dp)
                 .align(Alignment.TopCenter),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -99,6 +104,8 @@ fun MainScreen(
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .imePadding()
+                // 手势导航条也在往下压：最后一行输入框会被它盖住一半。
+                .navigationBarsPadding()
                 .padding(horizontal = 10.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {

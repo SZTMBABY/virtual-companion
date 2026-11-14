@@ -9,10 +9,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -22,7 +24,9 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -48,6 +52,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.virtualcompanion.data.chat.ChatClient
+import com.example.virtualcompanion.data.chat.PromptBuilder
 import com.example.virtualcompanion.data.model.AppSettings
 import com.example.virtualcompanion.data.model.AsrEngine
 import com.example.virtualcompanion.data.model.CharacterCard
@@ -123,6 +128,7 @@ fun SettingsScreen(
      */
     onSaveSection: (String) -> Unit = {},
 ) {
+    var showPrompt by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -133,6 +139,8 @@ fun SettingsScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                // Android 15+ 强制 edge-to-edge：不加这行标题会顶到状态栏里。
+                .statusBarsPadding()
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -155,6 +163,8 @@ fun SettingsScreen(
                 .fillMaxWidth()
                 .weight(1f)
                 .verticalScroll(rememberScrollState())
+                // 最后一组会贴着手势导航条，留出来才点得到「保存本组」。
+                .navigationBarsPadding()
                 .padding(horizontal = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -738,10 +748,44 @@ fun SettingsScreen(
                     fontSize = 11.sp,
                     lineHeight = 15.sp,
                 )
+                Text(
+                    text = "改完人设不知道有没有生效？点下面看一眼她实际收到的提示词。",
+                    color = Color(0xFF5E7A91),
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                )
+                PillButton(text = "查看当前提示词", onClick = { showPrompt = true }, solid = false)
             }
 
             Spacer(Modifier.height(20.dp))
         }
+    }
+
+    if (showPrompt) {
+        // 这段就是每次请求真正发给模型的开头（记忆摘要与历史在后面另拼）。
+        // 用户报「改了人设没用」时，先让他自己看见这一屏，比任何解释都直接。
+        val text = remember(settings, persona, character, showPrompt) {
+            PromptBuilder.systemPrompt(persona, character, settings)
+        }
+        AlertDialog(
+            onDismissRequest = { showPrompt = false },
+            confirmButton = {
+                TextButton(onClick = { showPrompt = false }) { Text("关闭") }
+            },
+            title = { Text("她实际收到的提示词") },
+            text = {
+                Text(
+                    text = text,
+                    color = Color(0xFFDCE9F3),
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    modifier = Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                )
+            },
+            containerColor = Color(0xFF12222F),
+        )
     }
 }
 

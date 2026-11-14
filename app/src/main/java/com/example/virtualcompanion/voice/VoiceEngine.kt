@@ -597,6 +597,12 @@ class VoiceEngine(
     fun beginSpeaking() {
         silenceJob?.cancel()
         silenceJob = null
+        // 她说话期间不计入「一次唤醒最多 60 秒」——回复长的时候，
+        // 计时器会在播放中途到点，把 awake 置回 false，于是 TTS 播完
+        // endSpeaking 走进 `!awake` 分支直接回待机，主人接着说话没人听。
+        // 用户报的就是这个：「回复过长时会过早关闭麦克风，对话接不下去」。
+        awakeJob?.cancel()
+        awakeJob = null
         graceJob?.cancel()
         graceJob = null
         backend?.close()
@@ -642,6 +648,8 @@ class VoiceEngine(
         openBackend()
         setState(State.AWAKE)
         armSilenceTimer()
+        // 播完重新起算「一次唤醒」的上限（beginSpeaking 里暂停过）。
+        armAwakeCap()
         Log.i(TAG, "→ AWAKE (tts done)")
     }
 
@@ -973,7 +981,11 @@ class VoiceEngine(
         // 唤醒态下：用**能量**而不是 ASR partial 来续静默计时。
         // 原因：背景人声也会产生 partial，若由 partial 续命，状态机永远退不回待机
         // （现象是麦克风一直开着、背景对话被当成主人的话送进模型）。
-        if (speech) {
+        // VAD 会漏判：实测有 frame 的 rms 已经到 0.14（底噪 0.0023，60 倍），
+        // Silero 仍给非人声。如果只按 speech 续命，主人正在说话也会被 8 秒定时器
+        // 踢回待机，看起来就像「聊着聊着就不听了」。所以能量明显高于底噪也算在说话。
+        val loudEnough = rms >= SPEECH_MIN_RMS && rms >= noiseFloor * SPEECH_OVER_FLOOR
+        if (speech || loudEnough) {
             armSilenceTimer()
             // 注意：这里**不再** armEndpoint()。端点的判据是识别文本停止增长
             // （见 armEndpoint 的注释），不是这一帧有没有能量。
@@ -1250,8 +1262,31 @@ class VoiceEngine(
 
         private var frameCount = 0
 
+        /** 上次重新开流的时间，用来给自愈重开限速。 */
+        private var lastRestartMs = 0L
+
+        private fun restartUtterance(reason: String) {
+            lastRestartMs = System.currentTimeMillis()
+            engine.beginUtterance()
+            lastText = ""
+            frameCount = 0
+            isOpen = true
+            Log.i(TAG, "local backend 重新开一句话（$reason）")
+        }
+
         override fun send(samples: FloatArray) {
-            if (!isOpen) return
+            if (!isOpen) {
+                // 识别器自己端点掉了（内置 VAD 判到静音），但这一轮还没结束。
+                // 原来这里直接 return —— 后果是这一轮之后**所有语音全部丢弃**，
+                // 真机表现正是「连续聊到第三轮，她突然听不见了；重新唤醒就好了」。
+                // 重新开流的代价很小（只新建 stream，不重载 24MB 模型），
+                // 所以这里自愈；300ms 限速是防止把碎片帧喂成一串空流。
+                if (System.currentTimeMillis() - lastRestartMs >= 300L) {
+                    restartUtterance("上一句被识别器自动端点")
+                } else {
+                    return
+                }
+            }
             frameCount++
             val text = engine.feed(samples)
             // 只在每 40 帧（4 秒）打一次，别刷屏；排查时临时改成每帧。
@@ -1264,8 +1299,10 @@ class VoiceEngine(
             }
             if (engine.isEndpoint) {
                 val final = engine.finish()
-                isOpen = false
-                onFinal?.invoke(final)
+                // 端点只代表「这一句说完了」，不代表这一轮结束：立刻续上新流，
+                // 否则主人接着说的下一句会被丢（见上面 !isOpen 分支的注释）。
+                restartUtterance("识别器端点后续流")
+                if (final.isNotBlank()) onFinal?.invoke(final)
             }
         }
 
