@@ -16,7 +16,7 @@ object MemoryMigration {
     private const val PREFS = "virtual_companion_memory"
     private const val KEY_IMPORTED = "imported_v2"
 
-    suspend fun importLegacyIfNeeded(context: Context, store: MemoryStore) {
+    suspend fun importLegacyIfNeeded(context: Context, store: KernelMemory) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (prefs.getBoolean(KEY_IMPORTED, false)) return
         // 已经用过新库就不再导入，避免重复灌入

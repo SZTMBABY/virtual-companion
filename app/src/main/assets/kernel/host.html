@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>kernel host</title>
+<style>html,body{margin:0;padding:0;background:transparent;overflow:hidden}</style>
+</head>
+<body>
+<script>
+// 这个页面只做一件事：把 vc-memory.js 加载进来，并把它的方法暴露给 Kotlin。
+// 用动态 import（classic script 里允许），这样模块加载失败也能回调到原生侧，
+// 而不是像 <script type="module"> 那样静默失败、Kotlin 侧只能干等超时。
+(function () {
+  var api = null;
+
+  function reply(id, payload) {
+    try { window.VCNative.onResult(id, String(payload)); } catch (e) {}
+  }
+
+  window.__vcCall = function (id, fn, argsJson) {
+    if (!api) { reply(id, JSON.stringify({ ok: false, error: 'kernel not ready' })); return; }
+    var fnImpl = api[fn];
+    if (typeof fnImpl !== 'function') {
+      reply(id, JSON.stringify({ ok: false, error: 'no such method: ' + fn }));
+      return;
+    }
+    try {
+      var args = argsJson ? JSON.parse(argsJson) : [];
+      var r = fnImpl.apply(api, args);
+      reply(id, r);
+    } catch (e) {
+      reply(id, JSON.stringify({ ok: false, error: String((e && e.message) || e) }));
+    }
+  };
+
+  window.__vcPing = function () { return api ? 'ready' : 'loading'; };
+
+  import('./vc-memory.js').then(function (mod) {
+    api = (mod && mod.default) ? mod.default : mod;
+    // 把默认导出上没有的方法也补上（我们同时具名导出了每个函数）
+    if (mod) {
+      for (var k in mod) {
+        if (k !== 'default' && typeof mod[k] === 'function' && !api[k]) api[k] = mod[k];
+      }
+    }
+    var n = 0;
+    for (var k2 in api) if (typeof api[k2] === 'function') n++;
+    try { window.VCNative.onReady(n); } catch (e) {}
+  }).catch(function (e) {
+    try { window.VCNative.onError(String((e && e.message) || e)); } catch (e2) {}
+  });
+})();
+</script>
+</body>
+</html>

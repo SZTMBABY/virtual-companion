@@ -6,8 +6,8 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 @Database(
-    entities = [Message::class, Block::class, AcpRule::class, MessageFts::class],
-    version = 1,
+    entities = [Message::class, AcpRule::class, KvEntry::class],
+    version = 2,
     exportSchema = false,
 )
 abstract class MemoryDatabase : RoomDatabase() {
@@ -26,8 +26,8 @@ abstract class MemoryDatabase : RoomDatabase() {
                 MemoryDatabase::class.java,
                 NAME,
             )
-                // 记忆库是可重建的派生物（原文另有一份在 message 表），
-                // 但 p5 还在迭代 schema，先允许破坏性迁移，稳定后改成 Migration。
+                // p5-8 把记忆引擎换成 billion-context 内核后，block / message_fts
+                // 两张表已无用途（分层与检索都在内核 state 里），直接破坏性重建。
                 .fallbackToDestructiveMigration(dropAllTables = true)
                 .build()
                 .also { instance = it }

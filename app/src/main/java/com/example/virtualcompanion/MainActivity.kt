@@ -33,9 +33,9 @@ import com.example.virtualcompanion.data.ModelImporter
 import com.example.virtualcompanion.data.chat.PromptBuilder
 import com.example.virtualcompanion.data.chat.Reply
 import com.example.virtualcompanion.data.chat.ReplySink
-import com.example.virtualcompanion.data.chat.TokenEstimator
+import com.example.virtualcompanion.data.chat.ChatMessage
+import com.example.virtualcompanion.data.memory.KernelMemory
 import com.example.virtualcompanion.data.memory.MemoryMigration
-import com.example.virtualcompanion.data.memory.MemoryStore
 import com.example.virtualcompanion.ui.live2d.Live2DController
 import com.example.virtualcompanion.ui.main.MainScreen
 import com.example.virtualcompanion.ui.main.MainUiState
@@ -184,66 +184,82 @@ class MainActivity : ComponentActivity() {
         }
 
         /**
-         * 助手回复落库。
+         * 助手回复落库，并推进一轮记忆压缩。
          *
-         * 单独抽出来是因为它必须发生在 `onDone` 之后（拿得到完整台词），
-         * 而 `onDone` 是同步回调、不能在主线程做 IO；用 scope 起一个旁路协程。
-         * 顺带触发一次折叠：把已经老掉的消息压成 T1 块，控制上下文长度。
+         * 这里**没有任何压缩策略**——是否该压、压哪一段、摘要写多长，
+         * 全部由 billion-context 内核决定（`KernelMemory.turn()`）。
+         * 本方法只做三件事：
+         * 1. 把回复写进 Room；
+         * 2. 问内核「现在该不该压」，该压就把区间原文交给模型写摘要；
+         * 3. 把摘要原样交回内核落块（内核会校验长度/保护区，不合规就拒，不重试）。
          */
         suspend fun persistAssistant(text: String) {
             val clean = text.trim()
             if (clean.isEmpty()) return
             container.memory.append("assistant", clean)
             runCatching {
-                // 折叠触发有两个条件，满足任一就折：
-                //
-                // ① 条数：未折叠的消息比「保留窗口 + 一整块」还多。
-                //    这条保证块不会碎成一条一条，也不会因为把上下文窗口调成 1M 就永远不折叠。
-                //    注意这里的保留窗口是 keepMessages（= keepRounds × 2），
-                //    与「单次请求最多带几条」的 historyWindow 已经不是同一个数字了。
-                // ② token：超过可用预算的 85%。长消息场景下条数完全不代表体积，
-                //    单靠 ① 会让几条超长消息把窗口顶爆。阈值从 60% 提到 85% 的理由：
-                //    1M 窗口下 60% ≈ 629K 永远不触发，8K 窗口下 60% 又折得太勤。
-                val keep = settings.llm.keepMessages
-                val liveCount = container.memory.recent(keep + MemoryStore.BLOCK_SPAN).size
-                val tooMany = liveCount > keep + MemoryStore.BLOCK_SPAN - 1
-
-                val budget = (settings.llm.contextWindow - settings.llm.maxTokens)
-                    .coerceAtLeast(512)
-                val threshold = (budget * 85) / 100
-                val used = TokenEstimator.estimate(
-                    container.memory.recent(keep).let { MemoryMigration.toChatMessages(it) },
+                val turn = container.memory.turn(
+                    KernelMemory.workingSet(settings.llm.contextWindow, settings.llm.maxTokens),
                 )
-                if (!tooMany && used < threshold) return@runCatching
+                if (BuildConfig.DEBUG) {
+                    // 两个数都由内核的 defaultCountTokens 算，口径一致。
+                    // 之前用 Kotlin 侧 TokenEstimator 算 wire 会带上每条消息的固定开销，
+                    // 与内核 raw 口径不同，算出的 pct 会虚高到 120%+。
+                    val pct = if (turn.tokens > 0) 100 * turn.wireTokens / turn.tokens else 100
+                    android.util.Log.i(
+                        "Memory",
+                        "turn raw=${turn.tokens} wire=${turn.wireTokens}tok/${turn.wire.size}msg pct=${pct}% " +
+                            "usage=${"%.3f".format(turn.contextUsage)} tier=${turn.tier} " +
+                            "inject=${turn.shouldInject} ranges=${turn.ranges.size} reason=${turn.reason.take(50)}",
+                    )
+                }
+                if (!turn.shouldInject || turn.ranges.isEmpty()) return@runCatching
+
+                // 模型写摘要（用户已批准「压缩时调模型」）。失败就跳过本轮，不影响对话。
+                val all = container.memory.recent(200)
+                val summaries = container.memorySummarizer.summarize(settings.llm, turn.ranges, all)
+                if (summaries.isEmpty()) {
+                    if (BuildConfig.DEBUG) android.util.Log.i("Memory", "summarize returned nothing, skip")
+                    return@runCatching
+                }
+                val applied = container.memory.apply(summaries)
                 if (BuildConfig.DEBUG) {
                     android.util.Log.i(
                         "Memory",
-                        "fold trigger live=$liveCount keep=$keep tokens=$used threshold=$threshold",
+                        "apply created=${applied.created} errors=${applied.errors.size} wire=${applied.wire.size}",
                     )
+                    applied.errors.forEach { android.util.Log.w("Memory", "reject: $it") }
                 }
-                // 循环折到「剩 keep 条」为止：foldOnce 每次最多折 BLOCK_SPAN 条，
-                // 只调一次的话 token 阈值触发的场景会折出 2~3 条的碎块，
-                // 5 个碎块合起来远不足 40 条，T1→T2 的压缩率就完全不可控了。
-                var guard = 0
-                while (container.memory.recent(keep + MemoryStore.BLOCK_SPAN).size > keep && guard++ < 16) {
-                    val made = container.memory.foldOnce(keepRecent = keep) { batch ->
-                        // 摘要由「上层」生成是内核契约；这里先用纯文本拼接兜底，
-                        // 不额外引入模型调用（会让每条回复的延迟翻倍）。
-                        batch.joinToString("；") { m ->
-                            val who = if (m.role == "user") "主人" else "小鲸"
-                            "$who：${m.text.take(60)}"
-                        }
-                    } ?: break
-                    if (BuildConfig.DEBUG) {
-                        android.util.Log.i("Memory", "folded block#${made.id} ${made.startRef}..${made.endRef}")
+            }.onFailure { e ->
+                android.util.Log.w("Memory", "turn failed: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+
+        /**
+         * 拼「长期记忆」片段：用户明确要求记住的偏好 + 内核检索命中的旧记忆。
+         *
+         * 注意这里**不拼摘要**——折叠掉的对话已经由内核投影成 wire 最前面那条
+         * `[Compressed conversation section]` system 消息，再由 `buildMessages`
+         * 原样插入。重复拼一次会让模型看到两份同样的摘要。
+         */
+        suspend fun buildMemoryContext(query: String): String {
+            val rules = runCatching { container.memory.rules() }.getOrDefault(emptyList())
+            val hits = runCatching { container.memory.search(query) }.getOrDefault(emptyList())
+            if (rules.isEmpty() && hits.isEmpty()) return ""
+            return buildString {
+                if (rules.isNotEmpty()) {
+                    appendLine("【必须遵守的用户偏好】")
+                    rules.forEach { appendLine("- ${it.text}") }
+                }
+                if (hits.isNotEmpty()) {
+                    if (rules.isNotEmpty()) appendLine()
+                    appendLine("【相关旧记忆】")
+                    hits.take(4).forEach { h ->
+                        val head = h.preview.replace('\n', ' ').trim()
+                        if (head.isNotBlank()) appendLine("- $head")
                     }
                 }
-                // 同层积满 4 块就升到上一层：T1→T2→T3，与 billion-context 的三层同构。
-                container.memory.promoteTier(1)
-                container.memory.promoteTier(2)
-            }.onFailure { e ->
-                android.util.Log.w("Memory", "fold failed: ${e.javaClass.simpleName}: ${e.message}")
-            }
+            }.trim()
         }
 
         /**
@@ -265,28 +281,37 @@ class MainActivity : ComponentActivity() {
             voice.beginThinking()
 
             replyJob = scope.launch {
-                // 记忆层：先把这一句落库（拿到稳定 ref），再检索相关旧记忆拼成 system 片段。
+                // 落库拿到稳定 ref；这一条本身也要参与内核的 token 统计与线上投影。
                 val currentRef = container.memory.append("user", clean)
-                // 「记住……」这类明确指令落成长期偏好（acp_rule）：
-                // 抄的是 billion-context「用户明确纠正过一次的东西永久记住」的机制。
+                // 「记住……」这类明确指令落成长期偏好（acp_rule）。
                 if (clean.startsWith("记住") && clean.length > 3) {
                     container.memory.addRule(clean.removePrefix("记住").trim('：', ':', '，', ',', ' '))
                     refreshMemory()
                 }
-                val memoryCtx = runCatching { container.memory.buildContext(clean) }
-                    .getOrDefault("")
+
+                // 这里只做「投影」，不跑 processTurn。
+                // 跑流水线会推进 survivedCount / tokenSnapshot / 增长基准，
+                // 而 persistAssistant 里每轮已经跑过一次 —— 同一轮跑两次会让
+                // growthSinceReference 反复重锚，表现为 growth 每 3 轮归零一次。
+                val wire = runCatching { container.memory.project() }
+                    .onFailure { android.util.Log.w("Memory", "project failed: ${it.message}") }
+                    .getOrDefault(emptyList())
+
+                // 排除刚落的这一条：buildMessages 末尾还会再追加 userInput。
+                val history = wire
+                    .filterNot { it.ref == currentRef }
+                    .filter { it.role == "user" || it.role == "assistant" }
+                    .map { ChatMessage(role = it.role, content = it.text, seq = it.ref) }
+
+                // 检索相关旧记忆 + 长期偏好，拼成 system 片段。
+                val memoryCtx = buildMemoryContext(clean)
                 if (BuildConfig.DEBUG) {
-                    // 便于验证「长期偏好 / 摘要 / 相关旧记忆」三段是否真的进了 prompt
                     android.util.Log.i(
                         "Memory",
-                        "ctx ${memoryCtx.length}字: " + memoryCtx.replace('\n', '|').take(200),
+                        "ctx ${memoryCtx.length}字 wire=${wire.size} hist=${history.size}",
                     )
                 }
-                // 排除刚落的这一条：buildMessages 末尾还会再追加 userInput，
-                // 不去掉就会把当前这句发两遍（实测模型会开始抱怨「复读机」）。
-                val history = container.memory.recent(settings.llm.keepMessages + 1)
-                    .filterNot { it.ref == currentRef }
-                    .let { MemoryMigration.toChatMessages(it) }
+
                 val messages = PromptBuilder.buildMessages(
                     persona = persona,
                     character = character,

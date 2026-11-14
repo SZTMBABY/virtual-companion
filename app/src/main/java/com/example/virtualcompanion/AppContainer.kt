@@ -5,8 +5,9 @@ import com.example.virtualcompanion.data.ModelRepository
 import com.example.virtualcompanion.data.SettingsStore
 import com.example.virtualcompanion.data.chat.ChatClient
 import com.example.virtualcompanion.data.chat.ConversationStore
+import com.example.virtualcompanion.data.memory.KernelMemory
 import com.example.virtualcompanion.data.memory.MemoryDatabase
-import com.example.virtualcompanion.data.memory.MemoryStore
+import com.example.virtualcompanion.data.memory.MemorySummarizer
 
 /**
  * 极简手写依赖容器。
@@ -22,8 +23,16 @@ class AppContainer(context: Context) {
     val conversation: ConversationStore by lazy { ConversationStore(app) }
     val chat: ChatClient by lazy { ChatClient() }
 
-    /** p5 记忆层：Room + FTS4（见 `docs/research/memory-candidates.md` 的方案二）。 */
-    val memory: MemoryStore by lazy { MemoryStore(MemoryDatabase.get(app).dao()) }
+    /**
+     * 记忆层：原样 vendor 的 billion-context 内核 + Room 持久层。
+     *
+     * 内核跑在 WebView 里（ESM，`assets/kernel/`），[KernelMemory] 是唯一接缝；
+     * 选择「整体 vendor」而不是 Kotlin 重写，理由写在 `docs/施工日志.md` p5-8 一节。
+     */
+    val memory: KernelMemory by lazy { KernelMemory(app, MemoryDatabase.get(app).dao()) }
+
+    /** 摘要生成器：内核给区间与指令，模型写摘要。 */
+    val memorySummarizer: MemorySummarizer by lazy { MemorySummarizer(memory, chat) }
 
     companion object {
         @Volatile

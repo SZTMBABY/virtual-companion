@@ -250,6 +250,52 @@ class ChatClient(
         sink.onDone(buildReply(extractor, raw.toString()))
     }
 
+    /**
+     * 一次性（非流式）补全，专门给记忆层写摘要用。
+     *
+     * 为什么单独一个方法而不是复用 [stream]：摘要不需要打字机效果，也不需要
+     * 情绪/动作字段，走 `stream:false` 少一次 SSE 解析、少一次取消竞态。
+     * 失败返回 null 由调用方降级（不抛异常——记忆压缩失败不该影响本轮对话）。
+     */
+    suspend fun complete(
+        llm: LlmConfig,
+        messages: List<ChatMessage>,
+        maxTokens: Int = 800,
+        temperature: Double = 0.2,
+    ): String? = withContext(Dispatchers.IO) {
+        if (llm.apiKey.isBlank()) return@withContext null
+        runCatching {
+            val body = JSONObject().apply {
+                put("model", llm.model)
+                put("stream", false)
+                put("temperature", temperature)
+                put("max_tokens", maxTokens)
+                put("messages", ChatMessage.listToJson(messages))
+            }.toString().toRequestBody(JSON)
+
+            val request = Request.Builder()
+                .url(llm.chatCompletionsUrl)
+                .addHeader("Authorization", "Bearer ${llm.apiKey}")
+                .addHeader("Content-Type", "application/json")
+                .post(body)
+                .build()
+
+            client.newCall(request).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    android.util.Log.w("ChatClient", "complete HTTP ${resp.code}: ${text.take(200)}")
+                    return@use null
+                }
+                val o = JSONObject(text)
+                val choices = o.optJSONArray("choices") ?: return@use null
+                val first = choices.optJSONObject(0) ?: return@use null
+                val msg = first.optJSONObject("message") ?: return@use null
+                if (msg.isNull("content")) return@use null
+                msg.optString("content", "").trim().ifEmpty { null }
+            }
+        }.getOrNull()
+    }
+
     private fun httpErrorMessage(code: Int, body: String): String {
         val detail = runCatching {
             JSONObject(body).optJSONObject("error")?.optString("message").orEmpty()
