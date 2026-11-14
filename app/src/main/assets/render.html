@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<style>html,body{margin:0;padding:0;background:#2b2b33;overflow:hidden;width:100%;height:100%}
+canvas{display:block}</style></head>
+<body>
+<script src="l2d/live2dcubismcore.min.js"></script>
+<script src="l2d/pixi.min.js"></script>
+<script src="l2d/cubism4.min.js"></script>
+<script>
+var lines=[];
+function log(s){lines.push(s);try{Native.emit(String(s));}catch(e){}
+  window.__probeText=lines.join(" | ");}
+function done(t){window.__done=t;try{Native.emit("RENDER_DONE="+t);}catch(e){}}
+window.onerror=function(m,src,l,c){log("WINDOW_ONERROR "+m+" @"+l+":"+c);done("JS_ERROR");};
+
+var model=null;
+
+async function boot(){
+  log("core="+(typeof Live2DCubismCore));
+  log("PIXI="+(typeof PIXI)+" ver="+(PIXI&&PIXI.VERSION));
+  log("live2d ns="+(PIXI&&typeof PIXI.live2d));
+  if(!PIXI||!PIXI.live2d){done("NO_PIXI_LIVE2D");return;}
+
+  var W=window.innerWidth||document.documentElement.clientWidth||640;
+  var H=window.innerHeight||document.documentElement.clientHeight||480;
+  var app=new PIXI.Application({
+    width:W, height:H,
+    backgroundAlpha:0, antialias:true, autoDensity:true,
+    resolution:Math.min(window.devicePixelRatio||1,2),
+    view:document.createElement('canvas')
+  });
+  document.body.appendChild(app.view);
+  log("app="+app.renderer.width+"x"+app.renderer.height+" type="+app.renderer.type+" W="+W+" H="+H);
+
+  var t0=performance.now();
+  model=await PIXI.live2d.Live2DModel.from('l2d/model/model.model3.json',{autoInteract:false});
+  log("model loaded in "+Math.round(performance.now()-t0)+"ms");
+  log("model size="+Math.round(model.width)+"x"+Math.round(model.height));
+  app.stage.addChild(model);
+
+  // scale to fit using real bounds
+  var b=model.getBounds();
+  log("bounds="+Math.round(b.x)+","+Math.round(b.y)+" "+Math.round(b.width)+"x"+Math.round(b.height));
+  var CW=W, CH=H;
+  var s=Math.min(CW/b.width, CH/b.height)*0.92;
+  model.scale.set(s);
+  var b2=model.getBounds();
+  model.x += (CW-b2.width)/2 - b2.x;
+  model.y += (CH-b2.height) - b2.y;
+  var b3=model.getBounds();
+  log("scale="+s.toFixed(4)+" after="+Math.round(b3.x)+","+Math.round(b3.y)+" "+Math.round(b3.width)+"x"+Math.round(b3.height)+" stage="+CW+"x"+CH);
+
+  var im=model.internalModel;
+  log("coreModel="+(im.coreModel?"OK":"NULL"));
+  log("paramCount="+(im.coreModel?im.coreModel.getParameterCount():-1));
+
+  // drive parameters manually
+  var t=0;
+  app.ticker.add(function(){
+    t+=0.033;
+    try{
+      im.coreModel.setParameterValueById('ParamAngleX', Math.sin(t*0.8)*20);
+      im.coreModel.setParameterValueById('ParamAngleY', Math.cos(t*0.6)*10);
+      im.coreModel.setParameterValueById('ParamAngleZ', Math.sin(t*0.5)*8);
+      im.coreModel.setParameterValueById('ParamBodyAngleX', Math.sin(t*0.4)*6);
+      im.coreModel.setParameterValueById('ParamBreath', (Math.sin(t*1.6)+1)/2);
+      im.coreModel.setParameterValueById('ParamEyeLOpen', 1);
+      im.coreModel.setParameterValueById('ParamEyeROpen', 1);
+      im.coreModel.setParameterValueById('ParamMouthOpenY', Math.abs(Math.sin(t*3)) );
+    }catch(e){}
+  });
+
+  // measure fps over 3s
+  var frames=0, start=performance.now();
+  app.ticker.add(function(){frames++;});
+  setTimeout(function(){
+    var fps=frames/((performance.now()-start)/1000);
+    log("fps="+fps.toFixed(1));
+    done("RENDER_OK");
+  },3000);
+}
+setTimeout(function(){boot().catch(function(e){log("FATAL "+e+" "+(e&&e.stack));done("FATAL");});},200);
+</script>
+</body></html>

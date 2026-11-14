@@ -1,0 +1,39 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# ---- added for this project ----
+/app/build
+/.kotlin
+/build
+
+# Scratch download/unpack dirs (models are re-fetched by scripts/fetch_models.sh)
+/.tmp_aar
+/.tmp_asr
+/.tmp_kws
+/.tmpres
+
+# Extracted Live2D asset copies. The model is NOT redistributable
+# (.vtube.json has "WorkshopSharingForbidden": true), so it must never be committed.
+/docs/research/live2d-asset
+/docs/research/l2dprobe
+
+# Local-only runtime assets the user imports at first launch (see docs/施工日志.md p0-2).
+# Never committed: no license, and redistributing it would be a violation.
+/.local_assets
+
+# Runtime output
+/shots/*.png
+!/shots/.gitkeep
