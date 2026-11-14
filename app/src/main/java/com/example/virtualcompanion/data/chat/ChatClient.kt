@@ -3,6 +3,7 @@ package com.example.virtualcompanion.data.chat
 import com.example.virtualcompanion.data.model.AppSettings
 import com.example.virtualcompanion.data.model.CharacterCard
 import com.example.virtualcompanion.data.model.LlmConfig
+import com.example.virtualcompanion.data.model.ModelInfo
 import com.example.virtualcompanion.data.model.PersonaCard
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -65,8 +66,9 @@ class ChatClient(
     }
 
     /** 拉模型列表的结果：成功带回模型 id 列表，失败带回可直接显示的中文原因。 */
+    /** 拉取模型列表的结果。 */
     sealed interface ModelsResult {
-        data class Ok(val models: List<String>) : ModelsResult
+        data class Ok(val models: List<ModelInfo>) : ModelsResult
         data class Fail(val message: String) : ModelsResult
     }
 
@@ -93,7 +95,7 @@ class ChatClient(
                 if (!resp.isSuccessful) {
                     return@withContext ModelsResult.Fail(httpErrorMessage(resp.code, body))
                 }
-                val models = parseModelIds(body)
+                val models = parseModels(body)
                 if (models.isEmpty()) {
                     ModelsResult.Fail("接口返回了，但里面没有模型。检查 Base URL 是不是指到了 /v1 目录。")
                 } else {
@@ -112,7 +114,15 @@ class ChatClient(
     }
 
     /** 兼容 `{"data":[{"id":"..."}]}`、`{"models":[...]}` 与纯数组三种返回形状。 */
-    private fun parseModelIds(body: String): List<String> = runCatching {
+    /**
+     * 解析 `/v1/models` 的响应。
+     *
+     * 兼容三种外壳：纯数组、`{"data":[...]}`、`{"models":[...]}`。
+     * 元素既可能是纯字符串，也可能是对象——对象里
+     * `id` 是唯一必填项，其余（`name` / `context_window` / `max_output_tokens` / `effort`）
+     * 都是「有就用，没有就留空」，因为 OpenAI 官方只保证 `id`。
+     */
+    private fun parseModels(body: String): List<ModelInfo> = runCatching {
         val text = body.trim()
         val arr = when {
             text.startsWith("[") -> JSONArray(text)
@@ -124,14 +134,28 @@ class ChatClient(
         buildList {
             for (i in 0 until arr.length()) {
                 val item = arr.opt(i)
-                val id = when (item) {
-                    is JSONObject -> item.optString("id").ifBlank { item.optString("name") }
-                    is String -> item
-                    else -> ""
+                val info = when (item) {
+                    is JSONObject -> {
+                        val id = item.optString("id").ifBlank { item.optString("name") }
+                        if (id.isBlank()) null else ModelInfo(
+                            id = id,
+                            displayName = item.optString("name"),
+                            contextWindow = item.optInt("context_window", 0),
+                            maxOutputTokens = item.optInt("max_output_tokens", 0),
+                            supportedEfforts = item.optJSONObject("effort")?.let { e ->
+                                e.optJSONArray("supported_levels")?.let { lv ->
+                                    (0 until lv.length()).mapNotNull { lv.optString(it).takeIf(String::isNotBlank) }
+                                }
+                            }.orEmpty(),
+                            defaultEffort = item.optJSONObject("effort")?.optString("default_level").orEmpty(),
+                        )
+                    }
+                    is String -> if (item.isBlank()) null else ModelInfo(id = item)
+                    else -> null
                 }
-                if (id.isNotBlank()) add(id)
+                if (info != null) add(info)
             }
-        }.distinct().sorted()
+        }.distinctBy { it.id }.sortedBy { it.id }
     }.getOrDefault(emptyList())
 
     /**
@@ -155,6 +179,11 @@ class ChatClient(
             put("stream", true)
             put("temperature", llm.temperature.toDouble())
             put("max_tokens", llm.maxTokens)
+            // 思考等级：空串表示「跟随服务端默认」，此时绝不发送该字段——
+            // 因为 OpenAI 官方端点不认识 reasoning_effort，发了会 400。
+            llm.reasoningEffort.trim().takeIf { it.isNotEmpty() }?.let {
+                put("reasoning_effort", it)
+            }
             put("messages", ChatMessage.listToJson(messages))
         }.toString().toRequestBody(JSON)
 
@@ -242,7 +271,12 @@ class ChatClient(
         if (choices.length() == 0) return null
         val first = choices.optJSONObject(0) ?: return null
         val delta = first.optJSONObject("delta") ?: return null
-        // 有些端点会返回 reasoning_content（DeepSeek-R1），那不是要念出来的话术，忽略
+        // 有些端点会返回 reasoning_content（DeepSeek-R1 / V4 的思考过程），那不是要念出来的话术，忽略。
+        //
+        // 这里必须显式判 isNull：只带思考内容的分片里 `content` 字段是 JSON null，
+        // 而 org.json 的 optString 会把 JSON null 转成字符串 "null" 返回（不是走默认值），
+        // 结果就是字幕上刷出一长串 null（实测确实出现过）。空串同理也要挡掉。
+        if (delta.isNull("content")) return null
         delta.optString("content", "").ifEmpty { null }
     }.getOrNull()
 
@@ -332,10 +366,15 @@ object PromptBuilder {
     }
 
     /**
-     * 构造完整消息列表：system + 滑窗历史 + 本轮用户输入。
+     * 构造完整消息列表：system + 记忆摘要 + 按 token 预算裁剪的历史 + 本轮用户输入。
      *
-     * `historyWindow` 是「条数」不是「轮数」，取 20 条即约 10 轮往返。
-     * p5 记忆层会在 system 之后插入一条摘要消息，这里先留好扩展点。
+     * 裁剪顺序（重要）：
+     * 1. 先确定预留：`maxTokens`（回复）+ 安全余量，剩下的才是历史可用预算；
+     * 2. system prompt 与记忆摘要**永远保留**（角色设定与长期记忆，砍了就不是她了）；
+     * 3. 历史从**最新往旧**累加，塞不下就停——断掉的永远是更早的对话，
+     *    而记忆层已经把更早的内容折叠成摘要了。
+     *
+     * `historyWindow` 仍然生效，作为「条数」硬上限，防止一堆超短消息把预算占满。
      */
     fun buildMessages(
         persona: PersonaCard,
@@ -345,14 +384,41 @@ object PromptBuilder {
         userInput: String,
         memorySummary: String? = null,
     ): List<ChatMessage> {
-        val out = ArrayList<ChatMessage>(history.size + 3)
-        out += ChatMessage.system(systemPrompt(persona, character, settings))
-        if (!memorySummary.isNullOrBlank()) {
-            out += ChatMessage.system("以下是你们之前对话的长期记忆摘要，可作为背景参考：\n$memorySummary")
+        val system = ChatMessage.system(systemPrompt(persona, character, settings))
+        val memory = if (memorySummary.isNullOrBlank()) {
+            null
+        } else {
+            ChatMessage.system("以下是你们之前对话的长期记忆摘要，可作为背景参考：\n" + memorySummary)
         }
+        val user = ChatMessage.user(userInput)
+
+        // 预留：回复长度 + 固定安全余量（接口自身开销）
+        val reserve = settings.llm.maxTokens.coerceIn(64, 8192) + SAFETY_MARGIN_TOKENS
+        val budget = (settings.llm.contextWindow.coerceIn(2_000, 1_000_000) - reserve)
+            .coerceAtLeast(256)
+
+        var used = TokenEstimator.estimate(system.content) +
+            (memory?.let { TokenEstimator.estimate(it.content) } ?: 0) +
+            TokenEstimator.estimate(user.content)
+
         val window = settings.llm.historyWindow.coerceIn(2, 100)
-        out += history.takeLast(window)
-        out += ChatMessage.user(userInput)
+        val picked = ArrayList<ChatMessage>(window)
+        for (m in history.takeLast(window).asReversed()) {
+            val cost = TokenEstimator.estimate(m.content) + TokenEstimator.PER_MESSAGE_OVERHEAD
+            if (used + cost > budget) break
+            used += cost
+            picked += m
+        }
+        picked.reverse()
+
+        val out = ArrayList<ChatMessage>(picked.size + 3)
+        out += system
+        memory?.let { out += it }
+        out += picked
+        out += user
         return out
     }
+
+    /** 除回复长度外，还要留给接口/格式的余量。 */
+    private const val SAFETY_MARGIN_TOKENS = 256
 }

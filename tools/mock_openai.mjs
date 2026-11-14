@@ -46,6 +46,11 @@ const server = http.createServer((req, res) => {
       const j = JSON.parse(body)
       console.log('[mock] model=%s stream=%s messages=%d', j.model, j.stream, j.messages?.length ?? 0)
       console.log('[mock] last user: %j', j.messages?.at(-1)?.content)
+      // 逐条打印角色与开头，用来验证「记忆片段是否真的进了 system」
+      for (const m of j.messages ?? []) {
+        const c = String(m.content ?? '').replace(/\n/g, '⏎')
+        console.log('[mock]   %s(%d): %s', m.role, c.length, c.slice(0, 120))
+      }
     } catch (e) {
       console.log('[mock] bad json')
     }

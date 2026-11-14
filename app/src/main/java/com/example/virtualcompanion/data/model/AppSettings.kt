@@ -14,6 +14,24 @@ data class LlmConfig(
     val maxTokens: Int = 512,
     /** 送进上下文的历史消息条数上限（滑窗），记忆层再额外注入摘要。 */
     val historyWindow: Int = 20,
+    /**
+     * 上下文窗口大小（token）。用来估算「还能塞多少历史」，
+     * 而不是只按条数切——长短消息混在一起时条数完全不代表体积。
+     *
+     * 设置页给了 8K/32K/128K/200K/1M 预设，也可以手填。
+     * 拉取模型列表时会按 `/v1/models` 里的 `context_window` 自动回填
+     * （DeepSeek 现在报 1048576），所以这里只是「拉不到元数据时的兜底值」。
+     */
+    val contextWindow: Int = 128_000,
+    /**
+     * 思考等级，直接透传成请求体的 `reasoning_effort`。
+     *
+     * 空串 = 不发送该字段（跟随服务端默认，兼容一切 OpenAI 协议端点）。
+     * DeepSeek 接受的取值：`none / minimal / low / medium / high / xhigh / ultra / max`，
+     * 其中 `none` 会关掉思考（首字延迟最低，最像「随口聊天」）。
+     * 具体某个模型支持哪几档，以 `/v1/models` 返回的 `effort.supported_levels` 为准。
+     */
+    val reasoningEffort: String = "",
 ) {
     /** 真正发请求时用的完整地址，兼容用户只填域名或填到 /v1 为止。 */
     val chatCompletionsUrl: String
@@ -46,6 +64,8 @@ data class LlmConfig(
         put("temperature", temperature.toDouble())
         put("maxTokens", maxTokens)
         put("historyWindow", historyWindow)
+        put("contextWindow", contextWindow)
+        put("reasoningEffort", reasoningEffort)
     }
 
     companion object {
@@ -59,7 +79,41 @@ data class LlmConfig(
                 temperature = o.optDouble("temperature", d.temperature.toDouble()).toFloat(),
                 maxTokens = o.optInt("maxTokens", d.maxTokens),
                 historyWindow = o.optInt("historyWindow", d.historyWindow),
+                contextWindow = o.optInt("contextWindow", d.contextWindow),
+                reasoningEffort = o.optString("reasoningEffort", d.reasoningEffort),
             )
+        }
+    }
+}
+
+/**
+ * 一个模型的元数据，来自 `GET {baseUrl}/v1/models`。
+ *
+ * OpenAI 官方只保证 `id`，其它字段是「有就更好」：
+ * DeepSeek 会返回 `context_window` / `max_output_tokens` / `effort.supported_levels`，
+ * one-api 之类的网关往往什么都不给，所以全部可空。
+ */
+data class ModelInfo(
+    val id: String,
+    val displayName: String = "",
+    val contextWindow: Int = 0,
+    val maxOutputTokens: Int = 0,
+    val supportedEfforts: List<String> = emptyList(),
+    val defaultEffort: String = "",
+) {
+    /** 列表里展示用：`deepseek-flash · DeepSeek-V4.1-Flash · 1M` */
+    val label: String
+        get() = buildList {
+            add(id)
+            if (displayName.isNotBlank() && displayName != id) add(displayName)
+            if (contextWindow > 0) add(formatContext(contextWindow))
+        }.joinToString(" · ")
+
+    companion object {
+        fun formatContext(tokens: Int): String = when {
+            tokens >= 1_000_000 -> "${"%.1f".format(tokens / 1_000_000f).trimEnd('0').trimEnd('.')}M"
+            tokens >= 1000 -> "${tokens / 1000}K"
+            else -> tokens.toString()
         }
     }
 }

@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.ksp)
 }
 
 android {
@@ -68,6 +69,10 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.okhttp)
     implementation(libs.androidx.documentfile)
+    // p5 记忆层：Room + FTS4（目标机 sqlite 3.28 无 FTS5，只有 FTS4）
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    ksp(libs.androidx.room.compiler)
     // Vendored from JitPack: com.github.k2-fsa.sherpa-onnx:sherpa-onnx:v2.0.1
     implementation(files("libs/sherpa-onnx.aar"))
     testImplementation(libs.junit)

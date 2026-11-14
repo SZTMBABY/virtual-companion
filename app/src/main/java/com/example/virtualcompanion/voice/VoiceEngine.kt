@@ -372,7 +372,8 @@ class VoiceEngine(
         if (BuildConfig.DEBUG) {
             dbgFrames++
             dbgPeakRms = maxOf(dbgPeakRms, rms)
-            if (System.currentTimeMillis() - dbgLastLogMs >= 5_000L) {
+            // 排查问题时把间隔临时调到 200ms，平时保持 30s 免得刷屏掩盖真实错误。
+            if (System.currentTimeMillis() - dbgLastLogMs >= 30_000L) {
                 dbgLastLogMs = System.currentTimeMillis()
                 Log.i(TAG, "mic frames=$dbgFrames peakRms=$dbgPeakRms " +
                     "src=${capture.sourceUsed} decodes=${kws.lastDecodeCount} " +

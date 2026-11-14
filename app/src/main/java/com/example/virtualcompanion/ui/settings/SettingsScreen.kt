@@ -45,8 +45,41 @@ import com.example.virtualcompanion.data.chat.ChatClient
 import com.example.virtualcompanion.data.model.AppSettings
 import com.example.virtualcompanion.data.model.AsrEngine
 import com.example.virtualcompanion.data.model.CharacterCard
+import com.example.virtualcompanion.data.model.ModelInfo
 import com.example.virtualcompanion.data.model.PersonaCard
 import kotlinx.coroutines.launch
+
+/**
+ * 上下文窗口预设（token 字符串 → 显示名）。
+ *
+ * 只放主流档位。填别的值走下面「窗口大小（手填）」输入框，
+ * 拉取模型列表时也会按服务端返回的 `context_window` 自动校准，
+ * 所以这里猜错不会造成实质问题。
+ */
+private val CONTEXT_PRESETS: List<Pair<String?, String>> = listOf(
+    "8192" to "8K",
+    "32768" to "32K",
+    "65536" to "64K",
+    "131072" to "128K",
+    "262144" to "256K",
+    "1048576" to "1M",
+)
+
+/**
+ * 思考等级预设（value → 显示名）。`null` = 「默认」（不发送 `reasoning_effort` 字段）。
+ *
+ * 取值来自 DeepSeek 报错信息里给出的完整枚举
+ * （`none / minimal / low / medium / high / xhigh / ultra / max`），
+ * 这里只暴露常用档位，避免在小屏上排两行。
+ */
+private val EFFORT_PRESETS: List<Pair<String?, String>> = listOf(
+    null to "默认",
+    "none" to "关",
+    "low" to "低",
+    "medium" to "中",
+    "high" to "高",
+    "max" to "最高",
+)
 
 /**
  * 设置页（p1-5）。
@@ -71,6 +104,10 @@ fun SettingsScreen(
     fetchModels: suspend () -> ChatClient.ModelsResult = {
         ChatClient.ModelsResult.Fail("当前版本没有接模型列表接口。")
     },
+    memoryCount: Int = 0,
+    memoryRules: List<String> = emptyList(),
+    onAddRule: (String) -> Unit = {},
+    onClearMemory: () -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -130,9 +167,27 @@ fun SettingsScreen(
                 )
                 // 拉取当前端点支持的模型列表，直接点选，省得手打模型名
                 val scope = rememberCoroutineScope()
-                var models by remember { mutableStateOf<List<String>?>(null) }
+                var models by remember { mutableStateOf<List<ModelInfo>?>(null) }
                 var fetching by remember { mutableStateOf(false) }
                 var fetchError by remember { mutableStateOf<String?>(null) }
+                var effortHint by remember { mutableStateOf("") }
+                // 拿到一个模型的元数据后统一做两件事：按服务端声明的真实窗口/输出上限校准，
+                // 以及把思考等级的可选范围提示出来。拉取列表和点选列表都走这里，避免两处逻辑漂移。
+                val applyModelMeta: (ModelInfo, (String) -> Unit) -> Unit = { info, onHint ->
+                    onSettingsChange { s ->
+                        s.copy(
+                            llm = s.llm.copy(
+                                contextWindow = info.contextWindow
+                                    .takeIf { c -> c in 2_000..10_000_000 }
+                                    ?: s.llm.contextWindow,
+                                maxTokens = info.maxOutputTokens
+                                    .takeIf { o -> o in 64..32_768 }
+                                    ?: s.llm.maxTokens,
+                            )
+                        )
+                    }
+                    onHint(describeEffort(info))
+                }
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -146,7 +201,14 @@ fun SettingsScreen(
                             fetchError = null
                             scope.launch {
                                 when (val r = fetchModels()) {
-                                    is ChatClient.ModelsResult.Ok -> models = r.models
+                                    is ChatClient.ModelsResult.Ok -> {
+                                        models = r.models
+                                        // 顺手把当前模型已有的元数据回填一次：
+                                        // 用户往往先手打了模型名，再来点「拉取」，这时窗口还是默认值。
+                                        r.models.firstOrNull { it.id == settings.llm.model }?.let { m ->
+                                            applyModelMeta(m) { effortHint = it }
+                                        }
+                                    }
                                     is ChatClient.ModelsResult.Fail -> {
                                         models = null
                                         fetchError = r.message
@@ -176,10 +238,10 @@ fun SettingsScreen(
                             .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        list.forEach { id ->
-                            val selected = id == settings.llm.model
+                        list.forEach { info ->
+                            val selected = info.id == settings.llm.model
                             Text(
-                                text = id,
+                                text = info.label,
                                 color = if (selected) Color(0xFF9BE7FF) else Color(0xFFB9CCDC),
                                 fontSize = 12.sp,
                                 modifier = Modifier
@@ -189,7 +251,22 @@ fun SettingsScreen(
                                         if (selected) Color(0x332563EB) else Color(0x14FFFFFF)
                                     )
                                     .clickable {
-                                        onSettingsChange { it.copy(llm = it.llm.copy(model = id)) }
+                                        onSettingsChange {
+                                            it.copy(
+                                                llm = it.llm.copy(
+                                                    model = info.id,
+                                                    // 选中即按该模型的真实窗口与输出上限校准，
+                                                    // 免得用户还得自己回来改数字。
+                                                    contextWindow = info.contextWindow
+                                                        .takeIf { c -> c in 2_000..10_000_000 }
+                                                        ?: it.llm.contextWindow,
+                                                    maxTokens = info.maxOutputTokens
+                                                        .takeIf { o -> o in 64..32_768 }
+                                                        ?: it.llm.maxTokens,
+                                                )
+                                            )
+                                        }
+                                        applyModelMeta(info) { effortHint = it }
                                     }
                                     .padding(horizontal = 8.dp, vertical = 6.dp),
                             )
@@ -198,6 +275,63 @@ fun SettingsScreen(
                 }
                 Text(
                     text = "实际请求地址：${settings.llm.chatCompletionsUrl}",
+                    color = Color(0xFF5E7A91),
+                    fontSize = 11.sp,
+                )
+                // 上下文窗口：决定「还能塞多少历史」，也决定记忆折叠何时触发。
+                // 按条数切在长短消息混排时会失真，所以这里让用户按自己模型的真实窗口调。
+                // 先给预设（点一下即填），下面仍保留输入框手填——预设覆盖不到就自己打。
+                TextFieldRow(
+                    label = "历史条数上限",
+                    value = settings.llm.historyWindow.toString(),
+                    placeholder = "20",
+                    onCommit = { v ->
+                        val n = v.trim().toIntOrNull()
+                        if (n != null && n in 2..100) {
+                            onSettingsChange { it.copy(llm = it.llm.copy(historyWindow = n)) }
+                        }
+                    },
+                )
+                LabeledChips(
+                    label = "上下文窗口（token）",
+                    hint = "点一下即填，也可以在下面手填",
+                    options = CONTEXT_PRESETS,
+                    selected = settings.llm.contextWindow.toString()
+                        .takeIf { v -> CONTEXT_PRESETS.any { it.first == v } },
+                    onSelect = { value, _ ->
+                        val n = value?.toIntOrNull() ?: return@LabeledChips
+                        onSettingsChange { it.copy(llm = it.llm.copy(contextWindow = n)) }
+                    },
+                )
+                TextFieldRow(
+                    label = "窗口大小（手填）",
+                    value = settings.llm.contextWindow.toString(),
+                    placeholder = "131072",
+                    onCommit = { v ->
+                        val n = v.trim().toIntOrNull()
+                        if (n != null && n in 2_000..10_000_000) {
+                            onSettingsChange { it.copy(llm = it.llm.copy(contextWindow = n)) }
+                        }
+                    },
+                )
+                // 思考等级：直接透传 reasoning_effort。空 = 不发这个字段（跟随服务端默认），
+                // 这样接 OpenAI 官方端点也不会因为多了个未知参数被 400。
+                LabeledChips(
+                    label = "思考等级",
+                    hint = if (effortHint.isBlank()) {
+                        "「默认」= 不发这个字段，跟随服务端。DeepSeek 支持 none/low/medium/high/max"
+                    } else {
+                        effortHint
+                    },
+                    options = EFFORT_PRESETS,
+                    selected = settings.llm.reasoningEffort.takeIf { it.isNotBlank() },
+                    onSelect = { value, _ ->
+                        onSettingsChange { it.copy(llm = it.llm.copy(reasoningEffort = value.orEmpty())) }
+                    },
+                )
+                Text(
+                    text = "除回复预留 ${settings.llm.maxTokens} token 外，历史约 ${settings.llm.historyWindow} 条。" +
+                        "拉取模型列表会自动把窗口填成该模型的真实值。",
                     color = Color(0xFF5E7A91),
                     fontSize = 11.sp,
                 )
@@ -384,6 +518,62 @@ fun SettingsScreen(
                     range = 0.15f..0.75f,
                     invert = true,
                     onValueChange = { v -> onSettingsChange { it.copy(wake = it.wake.copy(kwsThreshold = v)) } },
+                )
+            }
+
+            // ---- 记忆 ----
+            Section(title = "记忆") {
+                Text(
+                    text = "已记住 $memoryCount 条对话。说「记住……」会被永久保留。",
+                    color = Color(0xFF9FC6E0),
+                    fontSize = 12.sp,
+                )
+                var ruleDraft by remember { mutableStateOf("") }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Box(Modifier.weight(1f)) {
+                        TextFieldRow(
+                            label = "长期偏好",
+                            value = ruleDraft,
+                            placeholder = "例如：叫我哥哥，不要说「您好」",
+                            onCommit = { v ->
+                                ruleDraft = ""
+                                if (v.isNotBlank()) onAddRule(v)
+                            },
+                        )
+                    }
+                }
+                if (memoryRules.isNotEmpty()) {
+                    Text(
+                        text = "已有 ${memoryRules.size} 条：",
+                        color = Color(0xFF5E7A91),
+                        fontSize = 11.sp,
+                    )
+                    memoryRules.take(6).forEach { r ->
+                        Text(
+                            text = "· $r",
+                            color = Color(0xFF9FC6E0),
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                        )
+                    }
+                    if (memoryRules.size > 6) {
+                        Text(
+                            text = "……还有 ${memoryRules.size - 6} 条",
+                            color = Color(0xFF5E7A91),
+                            fontSize = 11.sp,
+                        )
+                    }
+                }
+                PillButton(text = "清空对话记忆", onClick = onClearMemory, solid = false)
+                Text(
+                    text = "清空只删对话与摘要，长期偏好会保留。",
+                    color = Color(0xFF5E7A91),
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
                 )
             }
 
@@ -581,6 +771,71 @@ private fun PillButton(text: String, onClick: () -> Unit, solid: Boolean) {
             .padding(horizontal = 12.dp, vertical = 7.dp),
     ) {
         Text(text, color = Color.White, fontSize = 12.sp)
+    }
+}
+
+/**
+ * 根据模型元数据生成「思考等级」这一行的说明文字。
+ *
+ * 服务端没报 `effort` 时返回空串，调用方会退回到通用说明。
+ * 只报 `supported_levels` 不报 `default_level` 的情况也见过，所以两段分别判空。
+ */
+private fun describeEffort(info: ModelInfo): String {
+    if (info.supportedEfforts.isEmpty()) return ""
+    val levels = info.supportedEfforts.joinToString("/")
+    return if (info.defaultEffort.isNotBlank()) {
+        "该模型支持 $levels，默认 ${info.defaultEffort}"
+    } else {
+        "该模型支持 $levels"
+    }
+}
+
+/**
+ * 一排「胶囊选项」：横向排布、按 [options] 顺序渲染，选中项高亮。
+ *
+ * 为什么不引 `ExposedDropdownMenuBox`：那套控件绑死 M3 主题与 Popup 窗口，
+ * 本页是自绘深色卡片风，混进来会显得突兀；而且这里只有 6 个档位，
+ * 直接铺开比「先点开再看」少一次点击——正好抵消自绘的成本。
+ *
+ * [selected] 为 null 表示「没有任何预设命中」，此时所有项都不高亮，
+ * 但下面的手填输入框仍然显示真实值，用户不会失去参照。
+ */
+@Composable
+private fun LabeledChips(
+    label: String,
+    hint: String,
+    options: List<Pair<String?, String>>,
+    selected: String?,
+    onSelect: (String?, String) -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(text = label, color = Color(0xFF9FC6E0), fontSize = 11.sp)
+        // 6 个档位在 533dp 宽度下刚好一行放得下；万一以后加档位，
+        // 用两个 Row 手动断行即可，不为此引入 FlowRow 的实验标记。
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            options.forEach { (value, text) ->
+                val active = value == selected
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(if (active) Color(0x332563EB) else Color(0x14FFFFFF))
+                        .clickable { onSelect(value, text) }
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                ) {
+                    Text(
+                        text = text,
+                        color = if (active) Color(0xFF9BE7FF) else Color(0xFFB9CCDC),
+                        fontSize = 11.sp,
+                    )
+                }
+            }
+        }
+        if (hint.isNotBlank()) {
+            Text(text = hint, color = Color(0xFF5E7A91), fontSize = 10.sp)
+        }
     }
 }
 
