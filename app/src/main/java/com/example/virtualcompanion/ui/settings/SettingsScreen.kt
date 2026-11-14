@@ -164,7 +164,8 @@ fun SettingsScreen(
                     append(settings.llm.model.ifBlank { "未填模型名" })
                     append(if (settings.llm.isConfigured) " · 已填 Key" else " · 未填 Key")
                 },
-                defaultExpanded = true,
+                // 所有分组默认折叠：进来先看到九行摘要，想看哪组再展开。
+                defaultExpanded = false,
             ) {
                 TextFieldRow(
                     label = "Base URL",
