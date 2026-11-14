@@ -29,19 +29,24 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      # compileSdk 37 may only exist in the preview channel on the runner image.
-      - name: Install SDK platform
+      # Do NOT use android-actions/setup-android here: it calls
+      # `sdkmanager --install tools`, a package that no longer exists in
+      # cmdline-tools 20+, so the step aborts before doing anything useful.
+      # The ubuntu runner image already ships an Android SDK; just top it up.
+      - name: Android SDK packages
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install "platform-tools" --channel=3 > /dev/null || true
-          for pkg in "platforms;android-37" "platforms;android-37.0"; do
-            echo "trying $pkg"
-            sdkmanager --install "$pkg" --channel=3 && break || true
+          set -x
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -1)"
+          fi
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          # compileSdk 37: the package id is versioned ("android-37.0") on the new
+          # SDK versioning scheme; try both spellings and let AGP report if neither lands.
+          for pkg in "platforms;android-37.0" "platforms;android-37" "build-tools;37.0.0"; do
+            "$SDKMANAGER" --install "$pkg" || true
           done
-          sdkmanager --list_installed | sed -n '1,40p'
+          ls "$ANDROID_HOME/platforms" || true
 
       # Large binaries are not in git; the script verifies every sha256.
       - name: Cache model downloads
