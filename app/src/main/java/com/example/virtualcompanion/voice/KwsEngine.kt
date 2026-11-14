@@ -43,10 +43,102 @@ class KwsEngine(private val assets: AssetManager) {
         const val ASSET_JOINER = "kws/joiner.int8.onnx"
         const val ASSET_TOKENS = "kws/tokens.txt"
         const val ASSET_KEYWORDS = "kws/keywords.txt"
+
+        /**
+         * 汉字 → 拼音 token 表（`字\tinitial final` 两列，20924 字）。
+         *
+         * 为什么需要它：模型只认 tokens.txt 里的 ARPAbet / 带调拼音 token，
+         * 而用户想改的唤醒词是汉字。这张表由 tokens.txt 反推生成，
+         * 只保留「声母 + 韵母」都能在 tokens.txt 里找到的字，所以表里的字一定能拼。
+         */
+        const val ASSET_PINYIN = "kws/pinyin.tsv"
+
+        /** 出厂默认唤醒词，必须与 `assets/kws/keywords.txt` 里的内容一致。 */
+        const val DEFAULT_WAKE_WORD = "小鲸"
     }
 
     private var spotter: KeywordSpotter? = null
     private var stream: OnlineStream? = null
+
+    /** 汉字 → 拼音 token（lazy 读 assets/kws/pinyin.tsv，只有 210KB） */
+    private val pinyinTable: Map<Char, String> by lazy {
+        val m = HashMap<Char, String>(26_000)
+        try {
+            assets.open(ASSET_PINYIN).bufferedReader(Charsets.UTF_8).useLines { lines ->
+                lines.forEach { line ->
+                    val tab = line.indexOf('\t')
+                    if (tab == 1 && line.length > 2) m[line[0]] = line.substring(2)
+                }
+            }
+            Log.i(TAG, "pinyin table loaded ${m.size} chars")
+        } catch (e: Throwable) {
+            Log.e(TAG, "pinyin table load failed: ${e.message}")
+        }
+        m
+    }
+
+    /** 当前生效的唤醒词（显示文本） */
+    var wakeWord: String = DEFAULT_WAKE_WORD
+
+    /** 当前生效的关键词行（`<拼音 tokens> :<boost> @<显示文本>`） */
+    private var keywordsLine: String = ""
+
+    /**
+     * 把汉字唤醒词翻成 sherpa 认识的拼音 token 串。
+     * @return 形如 `x iǎo j īng`；有任何字不在词表里就返回 null（调用方该拒绝这次修改）。
+     */
+    fun toPinyin(word: String): String? {
+        val sb = StringBuilder()
+        for (ch in word.trim()) {
+            if (ch.isWhitespace()) continue
+            val py = pinyinTable[ch] ?: return null
+            if (sb.isNotEmpty()) sb.append(' ')
+            sb.append(py)
+        }
+        return if (sb.isEmpty()) null else sb.toString()
+    }
+
+    /** 该字是否支持（设置页用来即时提示，避免用户输入生僻字后才发现唤不醒）。 */
+    fun supports(ch: Char): Boolean = pinyinTable.containsKey(ch)
+
+    /**
+     * 运行时更换唤醒词。
+     *
+     * `KeywordSpotter.createStream(String)` 支持按流给关键词，所以不用重建 5.4MB 的模型，
+     * 只要换一个 stream（实测毫秒级）。这样设置页改完立刻生效，无需重启 App。
+     *
+     * @return true 表示换成功；false 表示有字不支持，保持原词不变。
+     */
+    @Synchronized
+    fun setWakeWord(word: String, boost: Float = 2.0f): Boolean {
+        val clean = word.trim()
+        val py = toPinyin(clean) ?: run {
+            Log.w(TAG, "wake word '$clean' has unsupported chars, keep '$wakeWord'")
+            return false
+        }
+        val s = spotter ?: run {
+            // 模型还没加载：先记住，等 load() 时生效
+            wakeWord = clean
+            keywordsLine = "$py :$boost @$clean"
+            return true
+        }
+        return try {
+            val line = "$py :$boost @$clean"
+            val ns = s.createStream(line)
+            try {
+                stream?.release()
+            } catch (_: Throwable) {
+            }
+            stream = ns
+            wakeWord = clean
+            keywordsLine = line
+            Log.i(TAG, "wake word → '$clean' ($py)")
+            true
+        } catch (e: Throwable) {
+            Log.e(TAG, "setWakeWord failed: ${e.message}")
+            false
+        }
+    }
 
     var keywordText: String = ""
         private set
@@ -94,9 +186,11 @@ class KwsEngine(private val assets: AssetManager) {
             // 不用先把模型 copy 到 files/ 占一倍空间。
             val s = KeywordSpotter(assetManager = assets, config = config)
             spotter = s
-            stream = s.createStream()
+            // 优先用内存里的唤醒词（设置页可能已经改过），没有再退回 assets 里的默认词。
+            val line = keywordsLine
+            stream = if (line.isNotBlank()) s.createStream(line) else s.createStream()
             Log.i(TAG, "loaded encoder=$ASSET_ENCODER keywords=$keywordsAsset " +
-                "threshold=$threshold boost=$boost")
+                "wakeWord=$wakeWord threshold=$threshold boost=$boost")
             true
         } catch (e: Throwable) {
             Log.e(TAG, "load failed: ${e.javaClass.simpleName}: ${e.message}", e)

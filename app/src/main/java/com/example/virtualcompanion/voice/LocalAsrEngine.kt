@@ -39,6 +39,10 @@ class LocalAsrEngine(private val assets: AssetManager) {
     var isEndpoint = false
         private set
 
+    /** 模型是否已加载（stream 可以有多个，模型只有一个）。 */
+    val isLoaded: Boolean get() = recognizer != null
+
+    @Synchronized
     fun load(): Boolean {
         if (recognizer != null) return true
         return try {
@@ -79,13 +83,28 @@ class LocalAsrEngine(private val assets: AssetManager) {
         }
     }
 
-    /** 开始新一句。 */
+    /**
+     * 开始新一句。
+     *
+     * **每次都必须新建 stream，不能复用旧的。**
+     * 第一版为了省事复用同一个 [OnlineStream]，只在句首 `reset()`；
+     * 但 [finish] 里调过 `inputFinished()`，流一旦被标记「输入结束」，
+     * 后续再 `acceptWaveform` 会被引擎忽略或解出乱码 ——
+     * 真机表现是「第一句勉强能出字，之后每一句都是无关的胡话」。
+     * stream 本身很轻（模型才是重的），每句新建代价可以接受。
+     */
+    @Synchronized
     fun beginUtterance() {
         val r = recognizer ?: return
-        val st = stream ?: return
         try {
-            r.reset(st)
+            stream?.release()
         } catch (_: Throwable) {
+        }
+        stream = try {
+            r.createStream()
+        } catch (e: Throwable) {
+            Log.e(TAG, "createStream failed: ${e.message}")
+            null
         }
         lastText = ""
         isEndpoint = false
@@ -95,6 +114,7 @@ class LocalAsrEngine(private val assets: AssetManager) {
      * 喂一帧 PCM。
      * @return 当前已识别出的完整文本（增量累积，调用方自己 diff）。
      */
+    @Synchronized
     fun feed(samples: FloatArray): String {
         val r = recognizer ?: return lastText
         val st = stream ?: return lastText
@@ -112,6 +132,7 @@ class LocalAsrEngine(private val assets: AssetManager) {
     }
 
     /** 用户停止说话（或 UI 手动结束）后调用，把尾巴冲出来。 */
+    @Synchronized
     fun finish(): String {
         val r = recognizer ?: return lastText
         val st = stream ?: return lastText
@@ -128,6 +149,7 @@ class LocalAsrEngine(private val assets: AssetManager) {
         }
     }
 
+    @Synchronized
     fun release() {
         try {
             stream?.release()

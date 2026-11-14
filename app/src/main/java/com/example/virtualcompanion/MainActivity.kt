@@ -515,6 +515,25 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // 唤醒词是角色卡字段，改完必须真的换掉 KWS 里的关键词。
+        // 早先只有「状态 chip 上显示新词」这一步，模型实际听的还是 assets 里的「小鲸」，
+        // 这就是「在设置页改唤醒词不生效」的根因。
+        LaunchedEffect(character.wakeWord, voiceUi.ready) {
+            val w = character.wakeWord.trim()
+            if (w.isEmpty()) return@LaunchedEffect
+            if (!voiceUi.ready) {
+                // 引擎还没就绪：先记下，start() 里会带进 load()
+                voice.prepareWakeWord(w)
+            } else {
+                val ok = voice.setWakeWord(w)
+                if (!ok) {
+                    statusError = "唤醒词「$w」里有模型不认识的字，换一个吧"
+                } else {
+                    android.util.Log.i("VoiceEngine", "wake word applied: $w")
+                }
+            }
+        }
+
         // 看门狗：真机上出现过「跑几轮后彻底唤不醒」——
         // 状态是 IDLE、running 是 true，但 AudioRecord 已经死了（被系统回收或被别的 App 抢占），
         // 这种情况没有任何回调会通知我们。每 5 秒主动探活一次。
@@ -555,7 +574,14 @@ class MainActivity : ComponentActivity() {
                 delay(200)
                 waited += 200
             }
-            android.util.Log.i("Inject", "ready=${voice.ui.value.ready} after ${waited}ms")
+            // 选本地识别时，还得等本地模型加载完（约 9 秒），
+            // 否则注入的帧进了 preBuffer（40 帧封顶）、后段全丢，final 为空。
+            var waitedLocal = 0
+            while (!voice.localAsrReady && waitedLocal < 20_000) {
+                delay(200)
+                waitedLocal += 200
+            }
+            android.util.Log.i("Inject", "ready=${voice.ui.value.ready} local=${voice.localAsrReady} after ${waited}ms/${waitedLocal}ms")
             withContext(Dispatchers.IO) {
                 android.util.Log.i("Inject", "start ${f.absolutePath}")
                 voice.debugInjectWav(f.absolutePath)
@@ -622,6 +648,34 @@ class MainActivity : ComponentActivity() {
                         withContext(Dispatchers.IO) { container.memory.clearAll() }
                         botMessage = "对话记忆清空了，长期偏好还留着。"
                         refreshMemory()
+                    }
+                },
+                // 设置本身是即时落盘的，这里只处理「光写盘不生效」的那一类。
+                onSaveSection = { name ->
+                    val ch = container.settings.character.value
+                    val w = ch.wakeWord.trim()
+                    when (name) {
+                        "角色卡", "唤醒" -> {
+                            if (w.isEmpty()) {
+                                statusError = "唤醒词不能为空"
+                            } else if (!voice.setWakeWord(w)) {
+                                // KwsEngine 只认识 assets/kws/tokens.txt 里的音节，
+                                // 生僻字/多音字可能拼不出来，这时必须告诉用户换词，
+                                // 否则改完永远唤不醒还以为保存失败。
+                                statusError = "唤醒词「$w」里有模型不认识的字，换一个吧"
+                            } else {
+                                botMessage = "记住啦，以后叫我「$w」。"
+                                android.util.Log.i("VoiceEngine", "wake word saved: $w")
+                            }
+                        }
+                        "语音" -> {
+                            voice.configure(
+                                container.settings.settings.value.wake,
+                                container.settings.settings.value.asrEngine,
+                            )
+                            botMessage = "语音设置已生效。"
+                        }
+                        else -> botMessage = "「$name」已保存。"
                     }
                 },
                 onDeleteModel = {

@@ -16,6 +16,18 @@ interface AsrBackend {
     /** 打开一个新会话（一句一开）。 */
     fun open(): Boolean
 
+    /**
+     * 是否需要「连续音频流」。
+     *
+     * 本地流式识别（zipformer transducer）是连续特征流模型：跳过静音段会让
+     * 声学特征错位，解出一堆与音频无关的胡话（真机实测：跳到静音帧后
+     * 识别结果是「又开始显示无想硬了」这种碎片）。所以它必须每帧都喂。
+     *
+     * 云端识别（腾讯 WebSocket）自带 VAD 且按 200ms 分包，允许只发有人声的段，
+     * 既能省流量，也能减少把背景噪声识别成文字的机会。
+     */
+    val needsContinuousAudio: Boolean get() = false
+
     /** 喂 16kHz 单声道 float PCM。 */
     fun send(samples: FloatArray)
 

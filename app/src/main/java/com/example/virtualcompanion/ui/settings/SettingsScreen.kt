@@ -23,6 +23,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -110,6 +111,14 @@ fun SettingsScreen(
     memoryRules: List<String> = emptyList(),
     onAddRule: (String) -> Unit = {},
     onClearMemory: () -> Unit = {},
+    /**
+     * 某组点了「保存本组」。
+     *
+     * 设置本身是即时落盘的（改完就写 SharedPreferences），这个回调存在的意义是
+     * 「有些改动需要额外动作才能生效」——目前只有唤醒词：它要换掉 KWS 的关键词流，
+     * 光写盘不会让模型改听。
+     */
+    onSaveSection: (String) -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -149,6 +158,8 @@ fun SettingsScreen(
             // ---- 大模型 ----
             Section(
                 title = "大模型（OpenAI 兼容协议）",
+                snapshot = settings.llm,
+                onSave = { onSaveSection("大模型") },
                 summary = buildString {
                     append(settings.llm.model.ifBlank { "未填模型名" })
                     append(if (settings.llm.isConfigured) " · 已填 Key" else " · 未填 Key")
@@ -342,6 +353,8 @@ fun SettingsScreen(
             // 「入口放到开发这个设置里面去，正常按默认来」），所以单独收进这一组、默认收起。
             Section(
                 title = "开发 / 高级",
+                snapshot = settings.llm,
+                onSave = { onSaveSection("开发 / 高级") },
                 summary = "保留 ${settings.llm.keepRounds} 轮 · 单次最多 ${settings.llm.historyWindow} 条",
             ) {
                 TextFieldRow(
@@ -385,6 +398,8 @@ fun SettingsScreen(
             // ---- 角色 ----
             Section(
                 title = "角色卡（小鲸）",
+                snapshot = character,
+                onSave = { onSaveSection("角色卡") },
                 summary = "${character.name.ifBlank { "未命名" }} · 唤醒词「${character.wakeWord.ifBlank { "未设置" }}」",
             ) {
                 TextFieldRow(
@@ -418,7 +433,12 @@ fun SettingsScreen(
             }
 
             // ---- 主人 ----
-            Section(title = "主人角色卡", summary = persona.displayName) {
+            Section(
+                title = "主人角色卡",
+                summary = persona.displayName,
+                snapshot = persona,
+                onSave = { onSaveSection("主人角色卡") },
+            ) {
                 TextFieldRow(
                     label = "称呼",
                     value = persona.name,
@@ -441,6 +461,8 @@ fun SettingsScreen(
             // ---- 显示 ----
             Section(
                 title = "显示",
+                snapshot = settings.display,
+                onSave = { onSaveSection("显示") },
                 summary = if (settings.display.halfBody) "半身模式" else "全身模式",
             ) {
                 SwitchRow(
@@ -489,6 +511,8 @@ fun SettingsScreen(
             // ---- 语音 ----
             Section(
                 title = "语音（ASR / TTS）",
+                snapshot = listOf(settings.tts, settings.tencentAsr, settings.asrEngine),
+                onSave = { onSaveSection("语音") },
                 summary = buildString {
                     append(if (settings.asrEngine == AsrEngine.CLOUD_TENCENT) "云端腾讯" else "离线本地")
                     append(" · TTS ")
@@ -560,6 +584,8 @@ fun SettingsScreen(
             // ---- 唤醒 ----
             Section(
                 title = "唤醒",
+                snapshot = settings.wake,
+                onSave = { onSaveSection("唤醒") },
                 summary = when {
                     !settings.wake.wakeEnabled -> "已关闭"
                     settings.wake.backgroundWakeEnabled -> "前台 + 后台常驻"
@@ -689,9 +715,31 @@ private fun Section(
     title: String,
     summary: String = "",
     defaultExpanded: Boolean = false,
+    /**
+     * 本组设置的当前快照，用来判断「用户改过没有」。
+     * 传 null 表示这组不需要保存按钮（比如「关于」）。
+     *
+     * 为什么用快照比较而不是逐字段 dirty 标记：设置项是整块 data class，
+     * 每次改动都会产生新实例，`!=` 天然就是「改过」；逐字段标记要写 30 多处，
+     * 漏一个就永远不出保存按钮，比不显示更糟。
+     */
+    snapshot: Any? = null,
+    /** 点「保存」时做点什么（比如把唤醒词真正塞进 KWS）。不传则只清掉改动标记。 */
+    onSave: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     var expanded by rememberSaveable(title) { mutableStateOf(defaultExpanded) }
+    // 首次进入时的值就是基线；后续和它不同即视为「改过」。
+    var baseline by remember(title) { mutableStateOf(snapshot) }
+    var savedAt by remember(title) { mutableStateOf(0L) }
+    val dirty = snapshot != null && baseline != snapshot
+    // 从「没改」变成「改过」时自动展开一次：用户可能是在收起状态下改的
+    // （比如点了保存按钮之外的地方），不展开就看不到保存按钮。
+    var wasDirty by remember(title) { mutableStateOf(false) }
+    LaunchedEffect(dirty) {
+        if (dirty && !wasDirty) expanded = true
+        wasDirty = dirty
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -724,7 +772,31 @@ private fun Section(
                 fontSize = 10.sp,
             )
         }
-        if (expanded) content()
+        if (expanded) {
+            content()
+            if (snapshot != null) {
+                val mark = savedAt
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (dirty) {
+                        PillButton(text = "保存本组", onClick = {
+                            onSave?.invoke()
+                            baseline = snapshot
+                            savedAt = System.currentTimeMillis()
+                        }, solid = true)
+                    } else if (mark > 0L) {
+                        Text(
+                            text = "已保存",
+                            color = Color(0xFF6FCF97),
+                            fontSize = 10.sp,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 

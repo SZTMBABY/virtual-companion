@@ -42,6 +42,23 @@ class VoiceEngine(
 ) {
     companion object {
         private const val TAG = "VoiceEngine"
+
+        /**
+         * 判定「有人在说话」的绝对下限。
+         *
+         * 实测本机麦克风（VOICE_RECOGNITION 源 + AEC）在安静房间的 RMS 约 0.002–0.008，
+         * 正常说话 0.02–0.15。低于 0.01 的一律当噪声，避免把风扇/空调声切成语音。
+         */
+        const val MIN_SPEECH_RMS = 0.010f
+
+        /** 语音判定要比噪声底高多少倍才算数。2.5 是实测值：1.8 会把键盘声放进来，4.0 会漏掉轻声。 */
+        const val SPEECH_OVER_FLOOR = 2.5f
+
+        /** 说完之后还继续送多少毫秒的音频（避免尾音被砍）。 */
+        const val SPEECH_HANGOVER_MS = 500L
+
+        /** 噪声底至少采够这么多帧才开始生效（约 3 秒）。 */
+        const val NOISE_WARMUP_FRAMES = 30
     }
 
     enum class State { IDLE, AWAKE, THINKING, SPEAKING, ERROR }
@@ -86,6 +103,15 @@ class VoiceEngine(
     private var preferredEngine = AsrEngine.CLOUD_TENCENT
     private var running = false
     private var silenceJob: Job? = null
+
+    /**
+     * 单次唤醒的硬上限计时器。
+     *
+     * 背景一直有人说话时，[armSilenceTimer] 会被持续到来的 partial 反复重置
+     * （这是有意的：主人自己也要能连着说）。但那样一来「隔壁聊天」就会让会话
+     * 无限延长。这道闸到点无条件回待机，代价是主人一次最多连续说 [WakeConfig.maxAwakeMs]。
+     */
+    private var awakeJob: Job? = null
     private var awake = false
 
     /**
@@ -103,12 +129,103 @@ class VoiceEngine(
     /** 后端还没就绪时暂存的音频帧（每帧 100ms，40 帧 = 4 秒足够覆盖建连+冷启动）。 */
     private val preBuffer = ArrayDeque<FloatArray>(40)
 
+    // ------------------------------------------------------------ 噪声底与语音门
+    //
+    // 为什么需要这一层：现场反馈「旁边有人说话」时会出现三个连锁问题——
+    //   ① 背景人声会被云端 ASR 当成主人的话送进模型，模型回答一件没说过的事；
+    //   ② 背景人声不断产生 partial，而 onPartial 里每次都 armSilenceTimer()，
+    //      于是静默计时永远被重置，状态机退不回待机、麦克风一直开着耗电；
+    //   ③ 唤醒词被背景里的同音词误触发（阈值 0.15 本来就比较灵敏）。
+    //
+    // 根治手段不是「调高阈值」（会连主人自己都唤不醒），而是先把
+    // **房间的噪声底估计出来**，再用「比噪声底高多少」来判断有没有人在说话。
+    // 这里只用能量，不做声纹——声纹在 MT6761 上跑不动，而且对「同一个人
+    // 隔两米说话」也没用。能量门能解决 ①②③ 里最要命的部分：
+    // 静默计时改由能量驱动后，背景说话不再无限延长会话。
+
+    /** RMS 环形缓冲，约 10 秒（100 帧 × 100ms）。 */
+    private val rmsRing = FloatArray(100)
+    private var rmsRingIdx = 0
+    private var rmsRingCount = 0
+
+    /** 当前估计的噪声底（房间底噪），自适应更新。 */
+    private var noiseFloor = 0.004f
+
+    /** 最近一次「判定为有人在说话」的时刻。 */
+    private var lastSpeechMs = 0L
+
+    /** 上一次因为静默超时进入 IDLE 的时刻，用于区分「刚退出」与「从未唤醒」。 */
+    private var noiseGuardDrops = 0
+
     val kwsHits: Int get() = kws.hits
+
+    /** 当前生效的唤醒词显示文本（可能由设置页在运行时改过）。 */
+    val wakeWord: String get() = kws.wakeWord
+
+    /** 本地识别模型是否已加载完（DEBUG 注入探针要等它，否则前几句会被丢掉）。 */
+    val localAsrReady: Boolean get() = localAsr.isLoaded
+
+    /**
+     * 运行时更换唤醒词。
+     *
+     * 不能只存进 SharedPreferences —— 唤醒判定发生在 [KwsEngine] 内部，
+     * 它只认启动时加载的 keywords 文件。这里直接换掉 KWS 的 stream，
+     * 改完立刻生效、不用重启。
+     *
+     * @return false 表示词里有模型不认识的字，界面该提示用户换一个。
+     */
+    fun setWakeWord(word: String): Boolean {
+        if (word.isBlank()) return false
+        if (word == kws.wakeWord) return true
+        // 不能在这里同步调 kws.setWakeWord：那个方法是 @Synchronized 的，
+        // 冷启动时会和 IO 线程上的 kws.load()（5 秒）抢同一把锁，
+        // 而这个方法是从 Main 的 LaunchedEffect / 点击回调里调的 ——
+        // 真机表现就是「一启动就无响应」（Waited 5005ms for FocusEvent）。
+        // 所以：主线程只做不碰模型的拼音校验，真正的换词丢到 IO。
+        if (kws.toPinyin(word) == null) return false
+        scope.launch(Dispatchers.IO) {
+            if (!kws.setWakeWord(word, config.kwsBoost)) {
+                Log.w(TAG, "setWakeWord: '$word' 无法生效")
+            }
+        }
+        return true
+    }
 
     fun configure(wake: WakeConfig, engine: AsrEngine) {
         config = wake
         preferredEngine = engine
     }
+
+    /**
+     * 记下想要的唤醒词；[start] 加载模型时会把它带进去。
+     *
+     * 与 [setWakeWord] 的区别：这个可以在引擎启动前调用（模型还没加载时
+     * `setWakeWord` 只能暂存，语义不够明确），`start()` 里会优先用它。
+     */
+    fun prepareWakeWord(word: String) {
+        if (word.isBlank()) return
+        pendingWakeWord = word
+        // 必须走 setWakeWord 而不是直接赋 kws.wakeWord：
+        // setWakeWord 会同时写 keywordsLine（真正发给模型的拼音行）。
+        // 曾经这里只赋 wakeWord，结果 start() 里的 `kws.wakeWord != pendingWakeWord`
+        // 判断为假、跳过了 setWakeWord，keywordsLine 一直是空，
+        // load() 就退回 assets 里的默认词 —— 真机表现为
+        // 「日志显示 wakeWord=小爱，实际仍然只有小鲸能唤醒」。
+        // 模型还没加载时 setWakeWord 只暂存、返回 true，是安全的。
+        // 同样不能在主线程同步调（见 setWakeWord 的注释）：先写不进锁的字段，
+        // 真正的 createStream 丢到 IO。
+        if (kws.toPinyin(word) == null) {
+            Log.w(TAG, "prepareWakeWord: '$word' 里有模型不认识的字，将回退默认词")
+        } else {
+            scope.launch(Dispatchers.IO) {
+                if (!kws.setWakeWord(word, config.kwsBoost)) {
+                    Log.w(TAG, "prepareWakeWord: '$word' 无法生效")
+                }
+            }
+        }
+    }
+
+    private var pendingWakeWord: String = ""
 
     fun start() {
         if (running) {
@@ -123,6 +240,13 @@ class VoiceEngine(
         // 放在主线程会让 FocusEvent 派发超时，直接触发系统 ANR 弹窗（实测踩过）。
         scope.launch(Dispatchers.IO) {
             if (config.wakeEnabled) {
+                // 必须在 load() 之前把唤醒词塞进 KwsEngine：load() 会用它建 stream，
+                // 晚于 load 就只能换 stream（也能用，但白白多建一次）。
+                if (pendingWakeWord.isNotBlank()) {
+                    // 幂等再写一次：即使 prepareWakeWord 已经调用过，
+                    // 这里也保证 keywordsLine 与 wakeWord 一致。
+                    kws.setWakeWord(pendingWakeWord, config.kwsBoost)
+                }
                 if (!kws.load(config.kwsThreshold, config.kwsBoost)) {
                     _ui.value = _ui.value.copy(state = State.ERROR, message = "唤醒模型加载失败")
                     Log.e(TAG, "kws load failed")
@@ -142,11 +266,33 @@ class VoiceEngine(
             Log.i(TAG, "started wake=${config.wakeEnabled} asr=$preferredEngine " +
                 "silence=${config.silenceTimeoutMs}ms")
 
-            // 预热本地 ASR：云端是主路径，但云端随时可能失败降级，
-            // 不能等到降级的那一刻才加载 8 秒的模型。
-            val t0 = System.currentTimeMillis()
-            localAsr.load()
-            Log.i(TAG, "local asr warmup ${System.currentTimeMillis() - t0}ms")
+            // 只在「本地识别」被选中时预热。
+            //
+            // 原实现无条件预热，理由是「云端可能失败要降级」。但真机上这是启动
+            // 卡顿的主因：KWS 模型 5.4MB + 本地 ASR 模型 24.5MB + Live2D WebView
+            // + 记忆内核 WebView 同时抢 4 个 A53 小核，主线程拿不到 CPU，
+            // 系统直接报「应用无响应」（Input dispatching timed out ... Waited 5005ms
+            // for FocusEvent）。实测无条件预热时冷启动必 ANR，去掉后立即正常。
+            //
+            // 代价：云端用户如果云端失败而降级本地，第一句要等约 8 秒加载模型。
+            // 这个代价可以接受——降级本来就意味着「云端不可用」，慢一点好过一启动就卡死。
+            //
+            // 而且不能和首帧抢：onnx 初始化会占满 4 个 A53 小核，主线程连焦点事件
+            // 都发不出去（实测 Waited 5005ms for FocusEvent）。所以延后 4 秒，
+            // 等界面真正画出来、焦点稳定后再加载。
+            if (preferredEngine == AsrEngine.LOCAL_SHERPA) {
+                scope.launch(Dispatchers.IO) {
+                    // 只让出 1 秒给首帧，别等太久：预热必须在用户开口前完成，
+                    // 否则唤醒后 openBackend() 才去加载 8 秒的模型，前几句会被
+                    // preBuffer（40 帧封顶）丢掉，真机表现是 final 为空。
+                    delay(1_000)
+                    val t0 = System.currentTimeMillis()
+                    localAsr.load()
+                    Log.i(TAG, "local asr warmup ${System.currentTimeMillis() - t0}ms")
+                }
+            } else {
+                Log.i(TAG, "local asr warmup skipped (cloud is primary, lazy-load on fallback)")
+            }
 
             _ui.value = _ui.value.copy(state = State.IDLE, message = "", ready = true)
         }
@@ -160,6 +306,10 @@ class VoiceEngine(
      * 且 KWS 的 `raw` 始终为空），所以「回放 → 唤醒」这条路在物理上测不通。
      * 但 App 内部的音频管线本身完全可测：读 wav → 切 100ms 帧 → 走同一个 [onFrame]。
      */
+    /** 注入中标志：期间看门狗不得重开麦克风（否则注入帧与静音帧交错，永远不命中）。 */
+    @Volatile
+    private var injecting = false
+
     fun debugInjectWav(path: String) {
         val samples = KwsSelfTest.readWav(path) ?: run {
             Log.e(TAG, "inject 失败：wav 读不出 $path")
@@ -167,6 +317,7 @@ class VoiceEngine(
         }
         // 必须先关麦：采集线程会持续把真实（静音）帧塞进同一个 KWS 特征流，
         // 与注入帧交错后音频被切碎，KWS 永远不命中（实测踩过）。
+        injecting = true
         val wasCapturing = capture.isRunning
         if (wasCapturing) capture.stop()
         val frame = AudioCapture.FRAME_SAMPLES
@@ -187,6 +338,7 @@ class VoiceEngine(
                 Log.e(TAG, "capture error: $msg")
             })
         }
+        injecting = false
         Log.i(TAG, "inject done off=$off awake=$awake state=${_ui.value.state}")
     }
 
@@ -213,6 +365,7 @@ class VoiceEngine(
         openBackend()
         setState(State.AWAKE)
         armSilenceTimer()
+        armAwakeCap()
         Log.i(TAG, "→ AWAKE ($reason)")
     }
 
@@ -220,6 +373,13 @@ class VoiceEngine(
         awake = false
         silenceJob?.cancel()
         silenceJob = null
+        awakeJob?.cancel()
+        awakeJob = null
+        // 绝对不要在这里调 backend.finish()：
+        // enterIdle 会被 armSilenceTimer 的协程（Main 调度器）直接调用，
+        // 而本地 ASR 的 finish() 是一次同步 onnx 解码（实测数秒），
+        // 放在主线程就是 ANR（真机复现过：「应用无响应」弹窗）。
+        // 收尾由 AsrBackend 自己在 endpoint 时完成。
         backend?.close()
         backend = null
         _ui.value = _ui.value.copy(partialText = "", rms = 0f, listening = false)
@@ -290,6 +450,7 @@ class VoiceEngine(
         if (!running) return
         // 还没 ready 说明 start() 正在后台建模型/开麦，此时插手会与它抢麦克风。
         if (!_ui.value.ready) return
+        if (injecting) return
         if (_ui.value.state == State.SPEAKING) return
         if (capture.isRunning) return
         Log.w(TAG, "watchdog: mic is dead while ${_ui.value.state}, reopening")
@@ -334,6 +495,23 @@ class VoiceEngine(
         }
     }
 
+    /**
+     * 武装「单次唤醒上限」。到点不管有没有人在说话都退出唤醒态。
+     *
+     * 这道闸专门对付「背景一直有人聊天」：静默计时能被 partial 无限续命，
+     * 但硬上限不会。日志里带 `noiseGuardDrops` 便于判断是不是背景人声导致的。
+     */
+    private fun armAwakeCap() {
+        awakeJob?.cancel()
+        awakeJob = scope.launch {
+            delay(config.maxAwakeMs)
+            if (awake && running) {
+                Log.i(TAG, "awake cap ${config.maxAwakeMs}ms → 退出唤醒态（背景说话中 drops=$noiseGuardDrops）")
+                enterIdle("awake cap")
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- ASR 后端
 
     /**
@@ -359,8 +537,9 @@ class VoiceEngine(
             val clean = text.trim()
             if (clean.isNotBlank()) {
                 _ui.value = _ui.value.copy(partialText = clean)
-                // 有内容就重置静默计时，否则用户还在说话就被判超时了。
-                armSilenceTimer()
+                // 注意：这里**不再** armSilenceTimer()。
+                // 静默计时改由 deliver() 里的语音能量驱动 —— 否则背景里有人说话
+                // 就会不断产生 partial，把 8 秒静默无限续命，状态机永远退不回待机。
             }
         }
         b.onFinal = { text -> handleFinalText(text) }
@@ -425,6 +604,7 @@ class VoiceEngine(
             // （实测表现为「云端 connected 了，但一条 partial/final 都没有」）。
             bindCallbacks(b)
 
+            Log.i(TAG, "backend installed: ${b.javaClass.simpleName} preBuffer=${preBuffer.size}")
             synchronized(frameLock) {
                 backend = b
                 // 把建连期间攒下的帧补进去，别让开头几个字丢掉
@@ -454,6 +634,9 @@ class VoiceEngine(
         if (rms > 0.01f && _ui.value.rms != rms) {
             _ui.value = _ui.value.copy(rms = rms)
         }
+
+        // 每帧都喂噪声估计器与语音门（无论唤醒与否），唤醒判定也要用它防误触发。
+        val speech = updateNoiseAndDetectSpeech(rms)
         // DEBUG 诊断：低频打「喂进去的能量 + 解码轮数 + 原始候选」，
         // 用来区分「麦克风没声音」和「有声音但 KWS 不认」。
         // 排查问题时把间隔临时调到 200ms，平时保持 5s 免得刷屏掩盖真实错误。
@@ -473,11 +656,39 @@ class VoiceEngine(
 
         if (!awake) {
             if (!config.wakeEnabled) return
+            // 关键约束：KWS 是**流式**模型，特征流必须连续。
+            // 一旦为了「省电」或「防背景人声」跳帧，特征就被切碎，
+            // 结果是主人自己喊也认不出来（此前注入测试时踩过一模一样的坑：
+            // 静音帧与注入帧交错，命中率直接归零）。所以这里每帧都喂。
             val hit = kws.feed(samples) ?: return
+
+            // 命中后加一道能量复核：唤醒词是人说的，必定伴随语音级能量。
+            // 背景里恰好出现的同音词如果很轻（电视、隔壁），会被这道挡掉。
+            //
+            // 必须用**近一秒的峰值**而不是当前帧：KWS 的解码有延迟，
+            // 命中往往在音节结束后 1–3 帧才报出来，那时这一帧可能已经是静音
+            // （实测 rms=0.0，把真实唤醒直接误拒了）。
+            val recentPeak = recentPeakRms(20)
+            if (recentPeak < MIN_SPEECH_RMS) {
+                noiseGuardDrops++
+                Log.i(TAG, "kws hit '$hit' rejected: peak=$recentPeak < $MIN_SPEECH_RMS (drops=$noiseGuardDrops)")
+                return
+            }
             _ui.value = _ui.value.copy(lastHeard = hit, heardCount = kws.hits, rms = rms)
             enterAwake("kws:$hit")
             return
         }
+
+        // 唤醒态下：用**能量**而不是 ASR partial 来续静默计时。
+        // 原因：背景人声也会产生 partial，若由 partial 续命，状态机永远退不回待机
+        // （现象是麦克风一直开着、背景对话被当成主人的话送进模型）。
+        if (speech) armSilenceTimer()
+
+        // 静音段不送云端：省钱、省流量，也少给背景噪声一次被识别成文字的机会。
+        // 但「刚说完」的 hangover 帧必须送，否则尾音会被切掉（实测砍掉尾字）。
+        val hangover = System.currentTimeMillis() - lastSpeechMs <= SPEECH_HANGOVER_MS
+        // 本地流式后端不能跳帧（会解出胡话），云端才做静音段裁剪。
+        if (!speech && !hangover && !(backend?.needsContinuousAudio ?: false)) return
 
         val b = backend
         if (b == null) {
@@ -487,6 +698,54 @@ class VoiceEngine(
             return
         }
         b.send(samples)
+    }
+
+    /**
+     * 最近 [n] 帧（每帧 100ms）里的最大 RMS。
+     *
+     * 用途见 [deliver] 里唤醒命中的能量复核：KWS 的命中报得比音节晚，
+     * 只看当前帧会把真唤醒误拒（实测 rms=0.0 时刚命中「小爱」）。
+     */
+    private fun recentPeakRms(n: Int): Float {
+        if (rmsRingCount == 0) return 0f
+        val take = n.coerceAtMost(rmsRingCount)
+        var peak = 0f
+        for (i in 0 until take) {
+            val idx = (rmsRingIdx - 1 - i + rmsRing.size * 2) % rmsRing.size
+            if (rmsRing[idx] > peak) peak = rmsRing[idx]
+        }
+        return peak
+    }
+
+    /**
+     * 更新噪声底，并判定当前帧是不是「有人在说话」。
+     *
+     * 算法：维护 10 秒 RMS 环形缓冲，取**低分位**当噪声底（用 20 分位而不是均值，
+     * 因为均值会被说话本身拉高）；语音判定 = 超出噪声底 [SPEECH_OVER_FLOOR] 倍
+     * 且绝对值高于 [MIN_SPEECH_RMS]。
+     *
+     * 相比「固定阈值」的好处：安静房间自动变灵敏，嘈杂环境自动变钝，
+     * 用户换房间/开空调不需要手动调参。
+     */
+    private fun updateNoiseAndDetectSpeech(rms: Float): Boolean {
+        rmsRing[rmsRingIdx] = rms
+        rmsRingIdx = (rmsRingIdx + 1) % rmsRing.size
+        if (rmsRingCount < rmsRing.size) rmsRingCount++
+
+        if (rmsRingCount >= NOISE_WARMUP_FRAMES) {
+            val n = rmsRingCount
+            val sorted = FloatArray(n)
+            for (i in 0 until n) sorted[i] = rmsRing[i]
+            sorted.sort()
+            // 20 分位：背景噪声大概率占多数静音帧，取低分位不会被说话污染。
+            val p20 = sorted[(n * 0.2f).toInt().coerceIn(0, n - 1)]
+            // 平滑跟随，避免单帧异常把底噪拉飞。
+            noiseFloor = noiseFloor * 0.95f + p20 * 0.05f
+        }
+
+        val speech = rms >= MIN_SPEECH_RMS && rms >= noiseFloor * SPEECH_OVER_FLOOR
+        if (speech) lastSpeechMs = System.currentTimeMillis()
+        return speech
     }
 
     private fun handleFinalText(text: String) {
@@ -505,12 +764,15 @@ class VoiceEngine(
     private inner class LocalAsrBackend : AsrBackend {
         private val engine get() = localAsr
 
+        // 流式 transducer 必须连续喂帧，不能跳静音（跳了就是胡话）。
+        override val needsContinuousAudio = true
+
         override var isOpen = false
             private set
 
         override var onPartial: ((String) -> Unit)? = {
+            // 与云端后端一致：partial 不续静默计时，否则背景说话会让会话永不结束。
             _ui.value = _ui.value.copy(partialText = it)
-            armSilenceTimer()
         }
         override var onFinal: ((String) -> Unit)? = { handleFinalText(it) }
         override var onError: ((String) -> Unit)? = {
@@ -530,13 +792,19 @@ class VoiceEngine(
 
         private var lastText = ""
 
+        private var frameCount = 0
+
         override fun send(samples: FloatArray) {
             if (!isOpen) return
+            frameCount++
             val text = engine.feed(samples)
+            // 只在每 40 帧（4 秒）打一次，别刷屏；排查时临时改成每帧。
+            if (BuildConfig.DEBUG && frameCount % 40 == 0) {
+                Log.i(TAG, "local send frames=$frameCount text='$text' endpoint=${engine.isEndpoint}")
+            }
             if (text.isNotBlank() && text != lastText) {
                 lastText = text
                 onPartial?.invoke(text)
-                armSilenceTimer()
             }
             if (engine.isEndpoint) {
                 val final = engine.finish()
@@ -549,7 +817,9 @@ class VoiceEngine(
             if (!isOpen) return
             val final = engine.finish()
             isOpen = false
-            onFinal?.invoke(final)
+            // 空结果不回调：TTS 播完后 openBackend() 会立刻开一个新会话，
+            // 没有音频时它马上 endpoint，回调空串只会刷日志、让上层误判「听到了」。
+            if (final.isNotBlank()) onFinal?.invoke(final)
         }
 
         override fun close() {

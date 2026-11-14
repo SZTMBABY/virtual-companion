@@ -227,6 +227,16 @@ data class WakeConfig(
     val backgroundWakeEnabled: Boolean = false,
     /** 唤醒后连续静默多久退回待机，单位毫秒。用户要求 8 秒。 */
     val silenceTimeoutMs: Long = 8_000L,
+    /**
+     * 单次唤醒的硬上限，单位毫秒。
+     *
+     * 为什么必须有：现场有背景人声时，ASR 会持续产生 partial，
+     * 每次 partial 都把静默计时往后推，状态机就永远退不回待机
+     * （现象是麦克风一直开着、耗电、还一直把别人的话送进模型）。
+     * 静默计时改由能量驱动之后仍会有「背景一直在说话」的极端情况，
+     * 这个硬上限是最后一道闸：到点无条件回待机，等下一次唤醒词。
+     */
+    val maxAwakeMs: Long = 60_000L,
     /** KWS 触发阈值，越低越灵敏也越容易误触发。 */
     val kwsThreshold: Float = 0.15f,
     /** KWS 关键词提权分数。 */
@@ -238,6 +248,7 @@ data class WakeConfig(
         put("wakeEnabled", wakeEnabled)
         put("backgroundWakeEnabled", backgroundWakeEnabled)
         put("silenceTimeoutMs", silenceTimeoutMs)
+        put("maxAwakeMs", maxAwakeMs)
         put("kwsThreshold", kwsThreshold.toDouble())
         put("kwsBoost", kwsBoost.toDouble())
         put("pauseListeningWhileSpeaking", pauseListeningWhileSpeaking)
@@ -251,6 +262,7 @@ data class WakeConfig(
                 wakeEnabled = o.optBoolean("wakeEnabled", d.wakeEnabled),
                 backgroundWakeEnabled = o.optBoolean("backgroundWakeEnabled", d.backgroundWakeEnabled),
                 silenceTimeoutMs = o.optLong("silenceTimeoutMs", d.silenceTimeoutMs),
+                maxAwakeMs = o.optLong("maxAwakeMs", d.maxAwakeMs),
                 kwsThreshold = o.optDouble("kwsThreshold", d.kwsThreshold.toDouble()).toFloat(),
                 kwsBoost = o.optDouble("kwsBoost", d.kwsBoost.toDouble()).toFloat(),
                 pauseListeningWhileSpeaking = o.optBoolean("pauseListeningWhileSpeaking", d.pauseListeningWhileSpeaking),
