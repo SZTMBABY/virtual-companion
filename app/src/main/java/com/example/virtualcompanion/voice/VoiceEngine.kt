@@ -484,8 +484,6 @@ class VoiceEngine(
         stableJob = null
         graceJob?.cancel()
         graceJob = null
-        continuationJob?.cancel()
-        continuationJob = null
         pendingText = ""
         capture.stop()
         backend?.close()
@@ -549,8 +547,8 @@ class VoiceEngine(
         // 兜底：如果已经识别出半句、却始终没等到 final（云端 VAD 不吐、
         // 或者主人说完就沉默），就把这半句**发出去**，而不是让它凭空消失。
         // 用户报的就是这个：「一直等到超时，然后这条消息就没了」。
-        if (flushPending && awake && pendingText.isNotBlank()) {
-            pendingText = (pendingText + _ui.value.partialText).trim()
+        if (flushPending && awake && (pendingText.isNotBlank() || _ui.value.partialText.isNotBlank())) {
+            pendingText = stripNoiseTail((pendingText + _ui.value.partialText).trim())
             Log.i(TAG, "→ 挂起收尾（$reason）")
             awake = false
             silenceJob?.cancel(); silenceJob = null
@@ -706,53 +704,28 @@ class VoiceEngine(
     }
 
     /**
-     * 文本稳定看门狗：识别文本 [TEXT_STABLE_MS] 不再变化就收尾。
+     * 让后端出 final 的唯一判据：**识别文本不再增长**。
      *
-     * 为什么要它：能量判据在风扇/空调这类**稳态**噪声下会失灵（噪声本身就
-     * 高于门限，或者麦克风 AGC 把底噪抬起来），speech 一直为 true，端点永远
-     * 不触发；而识别文本停止增长这件事与噪声无关 —— 主人说完了，模型就不再
-     * 吐新字。这是云端场景下对「末尾 blank token 时长」最接近的近似。
-     */
-    private fun startStabilityWatch() {
-        stableJob?.cancel()
-        stableJob = scope.launch {
-            while (awake && running) {
-                delay(200)
-                if (!awake) break
-                if (finalized) continue
-                val b = backend ?: continue
-                if (!b.isOpen) continue
-                val text = lastPartialText.trim()
-                if (text.isEmpty() || lastPartialAt == 0L) continue
-                if (System.currentTimeMillis() - lastPartialAt < config.endpointMs) continue
-                finalized = true
-                Log.i(TAG, "text stable ${config.endpointMs}ms → 主动收尾: '$text'")
-                scope.launch(Dispatchers.IO) {
-                    try {
-                        b.finish()
-                    } catch (e: Throwable) {
-                        Log.w(TAG, "stable finish failed: ${e.message}")
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * 人声停止后主动收尾。
+     * 为什么不用能量：实测风扇场景下 `speech` 判得非常不准 —— 同一段真实说话，
+     * `gate frames=21 speechOn=5`（只认出 5 帧），甚至有 `rms=0.209` 但
+     * `speechOn=0` 的时刻（Silero 判否）。用能量驱动端点，结果就是
+     * 「一半音频被裁掉 → 识别不全」。
      *
-     * 每次检测到人声就重置；[ENDPOINT_MS] 内没再检测到人声，就说明主人说完了，
-     * 立即让后端出 final。比等服务端 VAD 可靠得多（服务端可能一直等静音，
-     * 而我们为了省流量偏偏不送静音）。
+     * 文本是**解码器自己的输出**：主人在说话，文本就在长；主人说完了，
+     * 文本就停。这与底噪、AGC、风扇都无关，也正是 sherpa 端点规则
+     * （末尾 blank token 时长）在云端语义下最接近的等价物。
+     *
+     * 所以：每来一个新 partial 就重置计时，[endpointDelayMs] 内没有新文本
+     * 就发 `finish()`（云端 `{"type":"end"}`，本地触发解码收尾）。
      */
     /**
-     * 本地兜底收尾的延迟：比服务端 VAD 再晚 400ms。
+     * 收尾延迟：就是「说完判定」本身。
      *
-     * 顺序很重要：服务端 VAD 先看到句末（它拿到的是连续流），
-     * 我们的能量兜底只负责「服务端没吐 final」的情况。如果兜底先触发，
-     * 会把还在说的句子切掉 —— 所以它必须更晚。
+     * 早先这里写成 `endpointMs + 400`，是为了让服务端 VAD 先判、我们只兜底。
+     * 实测证明服务端根本不会自己判（等 10 秒都不吐 `slice_type=2`），
+     * 所以这段额外延迟纯属白等，去掉。
      */
-    private fun endpointDelayMs(): Long = config.endpointMs + 400L
+    private fun endpointDelayMs(): Long = config.endpointMs
 
     private fun armEndpoint() {
         endpointJob?.cancel()
@@ -820,24 +793,15 @@ class VoiceEngine(
                 if (clean != lastPartialText) {
                     lastPartialText = clean
                     lastPartialAt = System.currentTimeMillis()
+                    // 文本还在长 = 主人还在说 → 重置收尾计时
+                    if (!finalized) armEndpoint()
                 }
-                // 宽限期里又开始出新字 → 主人刚才只是停顿，不是说完。
-                //
-                // 判据必须是**文字**而不是能量：实测 final 之后紧跟一帧
-                // `speech=true`（尾音/AEC 残留），用能量判就会把整句挂起来
-                // 永远发不出去（日志：`继续说 → 取消宽限，已挂起 '住在杭州，做后端开发。'`）
-                // 之后再也没有下文。文字出现才说明真的在说新内容。
-                if (pendingText.isNotBlank() && clean != pendingText) {
-                    if (graceJob?.isActive == true) {
-                        graceJob?.cancel()
-                        graceJob = null
-                        Log.i(TAG, "继续说（新 partial）→ 取消宽限，挂起 '${pendingText}' 等拼接")
-                        // 服务端在 final 之后就把会话关了，要接着听必须重开一个。
-                        // 重开失败也无所谓：下面还有 3 秒的续说超时兜底。
-                        if (backend == null) openBackend()
-                        armContinuationTimeout()
-                    }
-                }
+                // 说明：早先这里还有一段「宽限期内出现新 partial 就取消宽限、
+                // 重开会话、把两段拼起来」的续说合并逻辑。实机证明它弊大于利：
+                // 服务端 final 之后紧接着的噪声 partial 就能把它取消
+                // （日志里 final 到 THINKING 隔了 3.5 秒，全部耗在续说超时上）。
+                // 现在的行为是确定的：final → 等 graceMs → 交给模型。
+                // 停顿超过「说完判定」就是新的一轮，和主流语音助手的表现一致。
                 // 注意：这里**不再** armSilenceTimer()。
                 // 静默计时改由 deliver() 里的语音能量驱动 —— 否则背景里有人说话
                 // 就会不断产生 partial，把 8 秒静默无限续命，状态机永远退不回待机。
@@ -909,14 +873,9 @@ class VoiceEngine(
             bindCallbacks(b)
 
             Log.i(TAG, "backend installed: ${b.javaClass.simpleName} preBuffer=${preBuffer.size}")
-            // 「partial 不再增长就收尾」这条兜底只给没有服务端端点的后端（本地）。
-            // 必须在这里判：enterAwake 那一刻 backend 还是 null，判不出来。
-            // 实测代价：判错时本地计时器会在服务端 final 之前 123ms 抢先收尾，
-            // 把一句话提前切断。
-            if (!b.hasServerEndpoint) startStabilityWatch() else {
-                stableJob?.cancel()
-                stableJob = null
-            }
+            // 新会话开始：上一句的 finalized 标记要清掉，否则这一轮
+            // armEndpoint 会直接 return，整句永远不会收尾。
+            finalized = false
             synchronized(frameLock) {
                 backend = b
                 // 把建连期间攒下的帧补进去，别让开头几个字丢掉
@@ -1016,9 +975,8 @@ class VoiceEngine(
         // （现象是麦克风一直开着、背景对话被当成主人的话送进模型）。
         if (speech) {
             armSilenceTimer()
-            // 说完之后要能自己收尾，不能指望服务端 VAD
-            armEndpoint()
-
+            // 注意：这里**不再** armEndpoint()。端点的判据是识别文本停止增长
+            // （见 armEndpoint 的注释），不是这一帧有没有能量。
         }
 
         // 静音段不送云端：省钱、省流量，也少给背景噪声一次被识别成文字的机会。
@@ -1163,11 +1121,6 @@ class VoiceEngine(
     /** 宽限期协程。 */
     private var graceJob: Job? = null
 
-    /** 续说超时协程（取消了宽限之后，等下一段 final 的上限）。 */
-    private var continuationJob: Job? = null
-
-    /** 续说超时的时长：够说半句短话，又不至于把一句话挂太久。 */
-    private val CONTINUATION_TIMEOUT_MS = 3_000L
 
     /**
      * 宽限期：final 之后再多等一会儿，看主人是不是只是**喘了口气**。
@@ -1244,15 +1197,13 @@ class VoiceEngine(
     /**
      * 把挂起的半句真正交给上层。
      *
-     * 三条路径会走到这里：宽限到期、续说超时、退出唤醒态兜底。
+     * 两条路径会走到这里：宽限到期、退出唤醒态兜底。
      * 抽成一个方法是为了保证只有**一处**清 `pendingText`，
      * 否则很容易出现「取消宽限后文字永远挂在内存里」。
      */
     private fun flushPending(reason: String) {
         graceJob?.cancel()
         graceJob = null
-        continuationJob?.cancel()
-        continuationJob = null
         val out = pendingText
         pendingText = ""
         if (out.isBlank()) return
@@ -1261,18 +1212,6 @@ class VoiceEngine(
         // 状态由上层 sendText() 统一推进（文字与语音两条入口要一致），
         // 这里只负责把整句交出去，不再自己 setState，否则会重复打日志。
         onUtterance?.invoke(out)
-    }
-
-    /**
-     * 续说超时：取消了宽限、重开后端之后，如果 3 秒内没有新的 final，
-     * 说明那一下「新 partial」其实是噪声 —— 把挂起的句子发出去，别丢。
-     */
-    private fun armContinuationTimeout() {
-        continuationJob?.cancel()
-        continuationJob = scope.launch {
-            delay(CONTINUATION_TIMEOUT_MS)
-            if (pendingText.isNotBlank()) flushPending("续说超时 ${CONTINUATION_TIMEOUT_MS}ms 无新内容")
-        }
     }
 
     // ---------------------------------------------------------------- 本地后端

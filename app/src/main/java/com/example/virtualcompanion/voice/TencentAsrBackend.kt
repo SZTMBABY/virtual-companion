@@ -73,21 +73,21 @@ class TencentAsrBackend(
      * 单次唤醒最多约 1.9MB，可以接受。
      */
     /**
-     * **不送静音段**（`false`）。
+     * **连续送音频**（`true`）。
      *
-     * 一开始以为「服务端 VAD 需要听到静音才能判句末」，于是改成 true 连续送。
-     * 真机实测证明这个假设是错的：
-     * ① 即便把 `vad_silence_time` 顶到 1800ms，服务端也**从不自己吐
-     *    `slice_type=2`**（等 10 秒都等不到），真正的句末一直是我们发
-     *    `{"type":"end"}` 逼出来的；
-     * ② 连续送静音等于把风扇噪声喂给识别器，十秒噪声被解成
-     *    `I will back see that fire my what's the?` 这种幻觉，而且会
-     *    混进正文（`住在杭州，做后端开发。I will back see ...`）。
+     * 两轮实测的取舍：
+     * ① 不送静音 → 服务端听不到句末，`final` 永远不回来（p6-9 的原始 bug）；
+     * ② 只送「人声帧」→ 我们的能量判据在风扇场景下把一半真实说话当成静音
+     *    裁掉（`gate frames=21 speechOn=5`），用户直接反馈「识别精度下降、
+     *    经常识别不全」。
      *
-     * 所以：只送「人声 + 尾音 hangover」，句末由 [VoiceEngine] 的
-     * 端点计时器发 end 触发。同时省流量、少一次噪声被识别成文字的机会。
+     * 所以音频一律连续送，识别完整度优先。静音带来的副作用是尾巴上
+     * 几秒噪声会被解成英文胡话，这个由 [VoiceEngine.stripNoiseTail] 在
+     * 拿到 final 之后按「中文句末标点之后不再保留非中文」清掉。
+     *
+     * 代价：唤醒态 32KB/s，受 `maxAwakeMs`（60 秒）约束，单次最多约 1.9MB。
      */
-    override val needsContinuousAudio: Boolean = false
+    override val needsContinuousAudio: Boolean = true
 
     /**
      * 腾讯云 v2 带 `needvad=1`：它自己按 `vad_silence_time` 判句末并吐
