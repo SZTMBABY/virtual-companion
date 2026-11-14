@@ -192,8 +192,19 @@ class VoiceEngine(
     }
 
     fun configure(wake: WakeConfig, engine: AsrEngine) {
+        val engineChanged = engine != preferredEngine
         config = wake
         preferredEngine = engine
+        // 切换引擎时必须复位「云端已失败」标记。
+        //
+        // 这个标记是「一次失败就整场会话不再重试云端」的粘滞位 ——
+        // 本来是为了避免每句话都重连一次失败的云端拖慢响应。
+        // 但它原来从不复位，导致：云端失败 → 降级本地 → 用户在设置里
+        // 切回「云端」→ 仍然走本地，而且没有任何提示。真机就是这个表现。
+        if (engineChanged) {
+            cloudFailed = false
+            Log.i(TAG, "asr engine → $engine (cloudFailed reset)")
+        }
     }
 
     /**

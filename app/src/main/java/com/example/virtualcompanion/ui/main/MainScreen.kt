@@ -199,6 +199,14 @@ private fun StatusChip(state: MainUiState) {
         state.voiceState == "AWAKE" || state.isListening -> "在听" to Color(0xFF60A5FA)
         else -> "待机 · 叫「${state.wakeWord}」" to Color(0xFF94A3B8)
     }
+    // 识别后端直接写在状态条上：用户问「我怎么知道离线/在线切换成功了」，
+    // 之前只写进 UiState.asrLabel 却没有任何地方显示，等于没有可观测性。
+    val engineTag = when {
+        state.asrLabel.contains("云端") -> "云"
+        state.asrLabel.contains("本地") -> "本地"
+        else -> ""
+    }
+    val chipLabel = if (engineTag.isBlank()) label else "$label · $engineTag"
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(50))
@@ -208,7 +216,7 @@ private fun StatusChip(state: MainUiState) {
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
-        Text(label, color = Color(0xFFE2E8F0), fontSize = 11.sp)
+        Text(chipLabel, color = Color(0xFFE2E8F0), fontSize = 11.sp)
         if (state.fps > 0) {
             Text("${state.fps}fps", color = Color(0xFF7A8FA6), fontSize = 10.sp)
         }
@@ -369,6 +377,8 @@ data class MainUiState(
     val fps: Int = 0,
     val error: String? = null,
     /** 半身构图：只留头部与上半身，小屏上脸更大。 */
+    /** 当前实际在用的识别后端（「云端识别」/「本地识别」），空串表示还没确定。 */
+    val asrLabel: String = "",
     val halfBody: Boolean = false,
     val halfBodyRatio: Float = 0.48f,
     /** 当前情绪（neutral/happy/shy/sad/angry/surprised），驱动气泡与表情。 */

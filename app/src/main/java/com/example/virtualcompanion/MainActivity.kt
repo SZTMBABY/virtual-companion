@@ -711,6 +711,7 @@ class MainActivity : ComponentActivity() {
                 halfBodyRatio = settings.display.halfBodyRatio,
                 emotion = emotion,
                 voiceState = voiceUi.state.name,
+                asrLabel = voiceUi.asrLabel,
                 wakeWord = character.wakeWord.ifBlank { "小鲸" },
                 partialText = voiceUi.partialText,
                 rms = voiceUi.rms,
