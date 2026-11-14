@@ -245,6 +245,23 @@ data class WakeConfig(
      * 这个硬上限是最后一道闸：到点无条件回待机，等下一次唤醒词。
      */
     val maxAwakeMs: Long = 60_000L,
+    /**
+     * 「说完判定」：多久没有新的话就认为这一句说完了，单位毫秒。
+     *
+     * 这个值太小是**真机上最常见的问题**：句中自然停顿（「我想想……嗯」、
+     * 说完前半句喘口气）会被当成句末，前半句直接发出去，后半句变成新的一句。
+     * 用户实测 1 秒的判定在停顿时直接被拆开。
+     *
+     * 同时它也是腾讯云 `vad_silence_time` 的取值（服务端 VAD 静音时长，
+     * 官方范围 240–2000ms）—— 两端必须一致，否则服务端先判句末，
+     * 我们自己把值调多大都没用（实测日志：`TencentAsr: final: '你，你。'`
+     * 在 3.2 秒时就到了，我们自己一条 endpoint 日志都没有）。
+     *
+     * 默认 1500ms：比正常换气停顿长，总延迟还能接受
+     * （判定 1500+400，再加宽限 500 ≈ 说完后 2.4 秒开始回应）。
+     * 想更宽松就调到 2400；实测被停顿切断就往上加。范围 800–2400。
+     */
+    val endpointMs: Long = 1_500L,
     /** KWS 触发阈值，越低越灵敏也越容易误触发。 */
     val kwsThreshold: Float = 0.15f,
     /** KWS 关键词提权分数。 */
@@ -257,6 +274,7 @@ data class WakeConfig(
         put("backgroundWakeEnabled", backgroundWakeEnabled)
         put("silenceTimeoutMs", silenceTimeoutMs)
         put("maxAwakeMs", maxAwakeMs)
+        put("endpointMs", endpointMs)
         put("kwsThreshold", kwsThreshold.toDouble())
         put("kwsBoost", kwsBoost.toDouble())
         put("pauseListeningWhileSpeaking", pauseListeningWhileSpeaking)
@@ -273,6 +291,7 @@ data class WakeConfig(
                 backgroundWakeEnabled = false,
                 silenceTimeoutMs = o.optLong("silenceTimeoutMs", d.silenceTimeoutMs),
                 maxAwakeMs = o.optLong("maxAwakeMs", d.maxAwakeMs),
+                endpointMs = o.optLong("endpointMs", d.endpointMs),
                 kwsThreshold = o.optDouble("kwsThreshold", d.kwsThreshold.toDouble()).toFloat(),
                 kwsBoost = o.optDouble("kwsBoost", d.kwsBoost.toDouble()).toFloat(),
                 pauseListeningWhileSpeaking = o.optBoolean("pauseListeningWhileSpeaking", d.pauseListeningWhileSpeaking),

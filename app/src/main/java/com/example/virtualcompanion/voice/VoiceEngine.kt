@@ -246,6 +246,12 @@ class VoiceEngine(
     /** 当前估计的噪声底（房间底噪），自适应更新。 */
     private var noiseFloor = 0.004f
 
+    /** 底噪估计的绝对下限。见 `trackNoise` 里的实测说明。 */
+    private val NOISE_FLOOR_MIN = 0.002f
+
+    /** 判「有人在说话」的绝对能量门槛（16k float，满量程 1.0）。 */
+    private val SPEECH_MIN_RMS = 0.012f
+
     /** 最近一次「判定为有人在说话」的时刻。 */
     private var lastSpeechMs = 0L
 
@@ -476,6 +482,11 @@ class VoiceEngine(
         endpointJob = null
         stableJob?.cancel()
         stableJob = null
+        graceJob?.cancel()
+        graceJob = null
+        continuationJob?.cancel()
+        continuationJob = null
+        pendingText = ""
         capture.stop()
         backend?.close()
         backend = null
@@ -522,7 +533,8 @@ class VoiceEngine(
         lastPartialText = ""
         lastPartialAt = 0L
         vadGate?.reset()
-        startStabilityWatch()
+        // 稳定性兜底**不在这里启**：这一刻 backend 还在异步建连（一定是 null），
+        // 判断会落空。真正的开关放在 openBackend() 装好后端之后（见那里注释）。
         kws.reset()
         openBackend()
         setState(State.AWAKE)
@@ -537,6 +549,18 @@ class VoiceEngine(
         // 兜底：如果已经识别出半句、却始终没等到 final（云端 VAD 不吐、
         // 或者主人说完就沉默），就把这半句**发出去**，而不是让它凭空消失。
         // 用户报的就是这个：「一直等到超时，然后这条消息就没了」。
+        if (flushPending && awake && pendingText.isNotBlank()) {
+            pendingText = (pendingText + _ui.value.partialText).trim()
+            Log.i(TAG, "→ 挂起收尾（$reason）")
+            awake = false
+            silenceJob?.cancel(); silenceJob = null
+            awakeJob?.cancel(); awakeJob = null
+            endpointJob?.cancel(); endpointJob = null
+            backend?.close()
+            backend = null
+            flushPending("退出唤醒态")
+            return
+        }
         if (flushPending && awake && !finalized && running) {
             val pending = _ui.value.partialText.trim()
             if (pending.length >= MIN_FLUSH_CHARS) {
@@ -575,6 +599,8 @@ class VoiceEngine(
     fun beginSpeaking() {
         silenceJob?.cancel()
         silenceJob = null
+        graceJob?.cancel()
+        graceJob = null
         backend?.close()
         backend = null
         if (capture.isRunning) capture.stop()
@@ -698,9 +724,9 @@ class VoiceEngine(
                 if (!b.isOpen) continue
                 val text = lastPartialText.trim()
                 if (text.isEmpty() || lastPartialAt == 0L) continue
-                if (System.currentTimeMillis() - lastPartialAt < TEXT_STABLE_MS) continue
+                if (System.currentTimeMillis() - lastPartialAt < config.endpointMs) continue
                 finalized = true
-                Log.i(TAG, "text stable ${TEXT_STABLE_MS}ms → 主动收尾: '$text'")
+                Log.i(TAG, "text stable ${config.endpointMs}ms → 主动收尾: '$text'")
                 scope.launch(Dispatchers.IO) {
                     try {
                         b.finish()
@@ -719,16 +745,25 @@ class VoiceEngine(
      * 立即让后端出 final。比等服务端 VAD 可靠得多（服务端可能一直等静音，
      * 而我们为了省流量偏偏不送静音）。
      */
+    /**
+     * 本地兜底收尾的延迟：比服务端 VAD 再晚 400ms。
+     *
+     * 顺序很重要：服务端 VAD 先看到句末（它拿到的是连续流），
+     * 我们的能量兜底只负责「服务端没吐 final」的情况。如果兜底先触发，
+     * 会把还在说的句子切掉 —— 所以它必须更晚。
+     */
+    private fun endpointDelayMs(): Long = config.endpointMs + 400L
+
     private fun armEndpoint() {
         endpointJob?.cancel()
         endpointJob = scope.launch {
-            delay(ENDPOINT_MS)
+            delay(endpointDelayMs())
             if (!awake || !running || finalized) return@launch
             val b = backend ?: return@launch
             if (!b.isOpen) return@launch
             if (_ui.value.partialText.isBlank()) return@launch
             finalized = true
-            Log.i(TAG, "endpoint ${ENDPOINT_MS}ms 无人声 → 主动收尾")
+            Log.i(TAG, "endpoint ${endpointDelayMs()}ms 无人声 → 主动收尾")
             // finish() 在本地后端是同步 onnx 解码（数秒），不能在主线程
             scope.launch(Dispatchers.IO) {
                 try {
@@ -786,6 +821,23 @@ class VoiceEngine(
                     lastPartialText = clean
                     lastPartialAt = System.currentTimeMillis()
                 }
+                // 宽限期里又开始出新字 → 主人刚才只是停顿，不是说完。
+                //
+                // 判据必须是**文字**而不是能量：实测 final 之后紧跟一帧
+                // `speech=true`（尾音/AEC 残留），用能量判就会把整句挂起来
+                // 永远发不出去（日志：`继续说 → 取消宽限，已挂起 '住在杭州，做后端开发。'`）
+                // 之后再也没有下文。文字出现才说明真的在说新内容。
+                if (pendingText.isNotBlank() && clean != pendingText) {
+                    if (graceJob?.isActive == true) {
+                        graceJob?.cancel()
+                        graceJob = null
+                        Log.i(TAG, "继续说（新 partial）→ 取消宽限，挂起 '${pendingText}' 等拼接")
+                        // 服务端在 final 之后就把会话关了，要接着听必须重开一个。
+                        // 重开失败也无所谓：下面还有 3 秒的续说超时兜底。
+                        if (backend == null) openBackend()
+                        armContinuationTimeout()
+                    }
+                }
                 // 注意：这里**不再** armSilenceTimer()。
                 // 静默计时改由 deliver() 里的语音能量驱动 —— 否则背景里有人说话
                 // 就会不断产生 partial，把 8 秒静默无限续命，状态机永远退不回待机。
@@ -816,6 +868,9 @@ class VoiceEngine(
             if (wantCloud) {
                 val factory = cloudAsrFactory
                 val cloud = factory?.invoke()
+                // 两端对齐：服务端 VAD 的静音时长必须跟着设置走，
+                // 否则「说完判定」调到 2 秒，服务端仍然 1 秒就断开。
+                (cloud as? TencentAsrBackend)?.vadSilenceMs = config.endpointMs.toInt()
                 if (cloud != null && cloud.open()) {
                     b = cloud
                     _ui.value = _ui.value.copy(asrLabel = "云端识别")
@@ -854,6 +909,14 @@ class VoiceEngine(
             bindCallbacks(b)
 
             Log.i(TAG, "backend installed: ${b.javaClass.simpleName} preBuffer=${preBuffer.size}")
+            // 「partial 不再增长就收尾」这条兜底只给没有服务端端点的后端（本地）。
+            // 必须在这里判：enterAwake 那一刻 backend 还是 null，判不出来。
+            // 实测代价：判错时本地计时器会在服务端 final 之前 123ms 抢先收尾，
+            // 把一句话提前切断。
+            if (!b.hasServerEndpoint) startStabilityWatch() else {
+                stableJob?.cancel()
+                stableJob = null
+            }
             synchronized(frameLock) {
                 backend = b
                 // 把建连期间攒下的帧补进去，别让开头几个字丢掉
@@ -870,6 +933,9 @@ class VoiceEngine(
     private val frameLock = Any()
 
     private var dbgFrames = 0
+    private var vadDbg = 0
+    private var vadDbgOn = 0
+    private var vadDbgAt = 0L
     private var dbgPeakRms = 0f
     private var dbgLastLogMs = 0L
 
@@ -888,7 +954,21 @@ class VoiceEngine(
         // 而且要**连续喂** —— VAD 是逐窗判别的流式模型，跳帧会让状态漂。
         trackNoise(rms)
         val gate = vadGate
-        val speech = if (gate != null) gate.feed(samples) else updateNoiseAndDetectSpeech(rms)
+        // 神经 VAD 只回答「像不像人声」，它挡不住风扇这类**稳态**强噪声
+        // （风扇的频谱平、能量稳，Silero 会给 0.5–0.8 的分）。所以还要加一道
+        // 能量下限：既要比绝对阈值响，也要明显高过房间底噪。
+        // 两把尺子都过才算有人说话 —— 少任何一把，实测都会把风扇送进云端。
+        val gateSaysSpeech = if (gate != null) gate.feed(samples) else updateNoiseAndDetectSpeech(rms)
+        val speech = gateSaysSpeech && rms >= SPEECH_MIN_RMS && rms >= noiseFloor * SPEECH_OVER_FLOOR
+        if (BuildConfig.DEBUG && awake) {
+            vadDbg++
+            vadDbgOn += if (speech) 1 else 0
+            if (System.currentTimeMillis() - vadDbgAt >= 2_000L) {
+                vadDbgAt = System.currentTimeMillis()
+                Log.i(TAG, "gate frames=$vadDbg speechOn=$vadDbgOn rms=$rms floor=$noiseFloor")
+                vadDbg = 0; vadDbgOn = 0
+            }
+        }
         // DEBUG 诊断：低频打「喂进去的能量 + 解码轮数 + 原始候选」，
         // 用来区分「麦克风没声音」和「有声音但 KWS 不认」。
         // 排查问题时把间隔临时调到 200ms，平时保持 5s 免得刷屏掩盖真实错误。
@@ -938,6 +1018,7 @@ class VoiceEngine(
             armSilenceTimer()
             // 说完之后要能自己收尾，不能指望服务端 VAD
             armEndpoint()
+
         }
 
         // 静音段不送云端：省钱、省流量，也少给背景噪声一次被识别成文字的机会。
@@ -1015,13 +1096,31 @@ class VoiceEngine(
             val sorted = FloatArray(n)
             for (i in 0 until n) sorted[i] = rmsRing[i]
             sorted.sort()
-            val p10 = sorted[(n * 0.1f).toInt().coerceIn(0, n - 1)]
+            // 用 20 分位而不是 10 分位，并且跳过「几乎为 0」的帧：
+            // 那些帧是麦克风被临时关掉/注入测试的间隙，不是房间真实底噪。
+            // 实测被它们带到 1e-4 之后，风扇 0.047 的能量看起来是底噪的 470 倍，
+            // 「比底噪高」这条判据直接失效。
+            var valid = 0
+            for (i in 0 until n) if (sorted[i] >= 0.004f) valid++
+            val p10 = if (valid >= n / 3) {
+                sorted[(n * 0.2f).toInt().coerceIn(0, n - 1)]
+            } else {
+                noiseFloor
+            }
             noiseFloor = if (p10 < noiseFloor) {
                 noiseFloor * 0.7f + p10 * 0.3f      // 底噪变低：跟得快
             } else {
                 noiseFloor * 0.98f + p10 * 0.02f    // 底噪变高：跟得慢（别被说话带跑）
             }
-            if (noiseFloor < 1e-4f) noiseFloor = 1e-4f
+            // 下限必须给死，不能让它掉到 1e-4。
+            //
+            // 实测（真机注入 + 风扇）：注入间隙里有几帧是真静音，p10 被拉到
+            // 1.0E-4，之后风扇的 rms=0.0169 看上去是底噪的 169 倍 ——
+            // 「比底噪高」这个判据彻底失效，风扇全程被判成有人在说话，
+            // 于是十秒噪声被送进云端，识别出
+            // `住在杭州，做后端开发。I will back see that fire my what's the?`
+            // 这种英文幻觉。
+            if (noiseFloor < NOISE_FLOOR_MIN) noiseFloor = NOISE_FLOOR_MIN
         }
     }
 
@@ -1058,6 +1157,68 @@ class VoiceEngine(
         return speaking
     }
 
+    /** 已 final、但还在宽限期内等主人会不会接着说下去的那半句。 */
+    private var pendingText = ""
+
+    /** 宽限期协程。 */
+    private var graceJob: Job? = null
+
+    /** 续说超时协程（取消了宽限之后，等下一段 final 的上限）。 */
+    private var continuationJob: Job? = null
+
+    /** 续说超时的时长：够说半句短话，又不至于把一句话挂太久。 */
+    private val CONTINUATION_TIMEOUT_MS = 3_000L
+
+    /**
+     * 宽限期：final 之后再多等一会儿，看主人是不是只是**喘了口气**。
+     *
+     * 为什么需要：句末判定是「静音够久」的物理判据，它无法区分
+     * 「说完了」和「停顿但还要说」。真人说话里 1–2 秒的停顿非常常见
+     * （组织语言、换气、被孩子打断）。用户实测就是被这个切开的：
+     * 说完前半句停顿两秒，前半句直接发出去了。
+     *
+     * 做法：final 不立刻发送，先挂 [pendingText]，等 [graceMs]；
+     * 期间如果又检测到人声，就取消宽限、把这段留着当下一句的前缀；
+     * 宽限到期才真正交给 LLM。代价是每条回复多等几百毫秒 ——
+     * 换来的是「不会被切成两句」，这个交换对陪伴场景值得。
+     */
+    private fun graceMs(text: String): Long {
+        // 句尾是逗号/顿号/省略号，或整句太短，八成没说完 → 多等一倍
+        val looksOpen = text.isNotEmpty() &&
+            (text.last() in "，,、；;…" || text.length <= 3)
+        return if (looksOpen) config.endpointMs else config.endpointMs / 3
+    }
+
+    /**
+     * 去掉识别结果尾部的噪声幻觉。
+     *
+     * 真机（风扇 + 无 AEC 的 GSI）实测：一句话说完之后，端点前那 2 秒的
+     * 噪声也会被解成英文，拼在正文后面：
+     * `住在杭州，做后端开发。I will back see that fire my what's the?`
+     * 云端并不会因为「已经是一句完整中文」就停下。
+     *
+     * 两条规则：
+     * - 已经出现过中文句末标点，就把后面连续的非中文内容砍掉；
+     * - 整句一个汉字都没有（纯英文噪声）就整句丢弃，别拿去问模型。
+     * 代价：主人真的用英文说话时会被丢掉 —— 这是中文陪伴场景下可接受的取舍。
+     */
+    private fun stripNoiseTail(text: String): String {
+        val t = text.trim()
+        if (t.isEmpty()) return t
+        if (t.none { it.code in 0x4E00..0x9FFF }) return ""
+
+        val cjkEnd = "。！？…"
+        val cut = t.indexOfLast { it in cjkEnd }
+        if (cut >= 0 && cut < t.length - 1) {
+            val tail = t.substring(cut + 1)
+            // 尾巴里没有汉字、却有 2 个以上连续字母 → 判为噪声幻觉
+            val hasCjk = tail.any { it.code in 0x4E00..0x9FFF }
+            val latinRun = tail.split(Regex("[^A-Za-z]+")).maxOfOrNull { it.length } ?: 0
+            if (!hasCjk && latinRun >= 2) return t.substring(0, cut + 1)
+        }
+        return t
+    }
+
     private fun handleFinalText(text: String) {
         val clean = text.trim()
         Log.i(TAG, "final: '$clean'")
@@ -1065,10 +1226,53 @@ class VoiceEngine(
         endpointJob?.cancel()
         endpointJob = null
         if (clean.isBlank()) return
-        _ui.value = _ui.value.copy(partialText = "", lastHeard = clean)
+        pendingText = if (pendingText.isBlank()) clean else pendingText + clean
+        pendingText = stripNoiseTail(pendingText)
+        if (pendingText.isBlank()) {
+            Log.i(TAG, "final 全是噪声幻觉，丢弃：'$clean'")
+            return
+        }
+        _ui.value = _ui.value.copy(partialText = "", lastHeard = pendingText)
+        graceJob?.cancel()
+        val wait = graceMs(pendingText)
+        graceJob = scope.launch {
+            delay(wait)
+            flushPending("grace ${wait}ms 到期")
+        }
+    }
+
+    /**
+     * 把挂起的半句真正交给上层。
+     *
+     * 三条路径会走到这里：宽限到期、续说超时、退出唤醒态兜底。
+     * 抽成一个方法是为了保证只有**一处**清 `pendingText`，
+     * 否则很容易出现「取消宽限后文字永远挂在内存里」。
+     */
+    private fun flushPending(reason: String) {
+        graceJob?.cancel()
+        graceJob = null
+        continuationJob?.cancel()
+        continuationJob = null
+        val out = pendingText
+        pendingText = ""
+        if (out.isBlank()) return
+        _ui.value = _ui.value.copy(partialText = "", lastHeard = out)
+        Log.i(TAG, "$reason，交给 LLM: '$out'")
         // 状态由上层 sendText() 统一推进（文字与语音两条入口要一致），
         // 这里只负责把整句交出去，不再自己 setState，否则会重复打日志。
-        onUtterance?.invoke(clean)
+        onUtterance?.invoke(out)
+    }
+
+    /**
+     * 续说超时：取消了宽限、重开后端之后，如果 3 秒内没有新的 final，
+     * 说明那一下「新 partial」其实是噪声 —— 把挂起的句子发出去，别丢。
+     */
+    private fun armContinuationTimeout() {
+        continuationJob?.cancel()
+        continuationJob = scope.launch {
+            delay(CONTINUATION_TIMEOUT_MS)
+            if (pendingText.isNotBlank()) flushPending("续说超时 ${CONTINUATION_TIMEOUT_MS}ms 无新内容")
+        }
     }
 
     // ---------------------------------------------------------------- 本地后端

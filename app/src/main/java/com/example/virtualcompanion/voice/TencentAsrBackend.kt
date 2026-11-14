@@ -1,6 +1,7 @@
 package com.example.virtualcompanion.voice
 
 import android.util.Base64
+import com.example.virtualcompanion.BuildConfig
 import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -71,7 +72,36 @@ class TencentAsrBackend(
      * 代价只在唤醒态：16k×16bit = 32KB/s，受 `maxAwakeMs`（60 秒）约束，
      * 单次唤醒最多约 1.9MB，可以接受。
      */
-    override val needsContinuousAudio: Boolean = true
+    /**
+     * **不送静音段**（`false`）。
+     *
+     * 一开始以为「服务端 VAD 需要听到静音才能判句末」，于是改成 true 连续送。
+     * 真机实测证明这个假设是错的：
+     * ① 即便把 `vad_silence_time` 顶到 1800ms，服务端也**从不自己吐
+     *    `slice_type=2`**（等 10 秒都等不到），真正的句末一直是我们发
+     *    `{"type":"end"}` 逼出来的；
+     * ② 连续送静音等于把风扇噪声喂给识别器，十秒噪声被解成
+     *    `I will back see that fire my what's the?` 这种幻觉，而且会
+     *    混进正文（`住在杭州，做后端开发。I will back see ...`）。
+     *
+     * 所以：只送「人声 + 尾音 hangover」，句末由 [VoiceEngine] 的
+     * 端点计时器发 end 触发。同时省流量、少一次噪声被识别成文字的机会。
+     */
+    override val needsContinuousAudio: Boolean = false
+
+    /**
+     * 腾讯云 v2 带 `needvad=1`：它自己按 `vad_silence_time` 判句末并吐
+     * `slice_type=2`。所以我们**不能**再用本地计时器替它收尾（会抢跑）。
+     */
+    override val hasServerEndpoint: Boolean = true
+
+    /**
+     * 服务端 VAD 的「静音多久算说完」，毫秒。由 [VoiceEngine] 按
+     * `WakeConfig.endpointMs` 注入，两边必须一致（见该字段的注释）。
+     * 官方范围 240–2000，超出会被服务端拒绝。
+     */
+    @Volatile
+    var vadSilenceMs: Int = 1_800
 
     private var socket: WebSocket? = null
     private val openLatch = CountDownLatch(1)
@@ -93,6 +123,11 @@ class TencentAsrBackend(
         settled = false
 
         val url = buildUrl()
+        // DEBUG：把 query 打出来（不含 signature），确认 vad_silence_time 真的上去了、
+        // 以及字典序有没有被改坏（改坏的表现是服务端 4013 或干脆不回话）。
+        if (BuildConfig.DEBUG) {
+            Log.i(TAG, "open url=${url.substringBefore("&signature=")}")
+        }
         val req = Request.Builder().url(url).build()
         val ws = client.newWebSocket(req, listener)
         socket = ws
@@ -119,6 +154,9 @@ class TencentAsrBackend(
         }
     }
 
+    private var sentFrames = 0
+    private var sentLogAt = 0L
+
     private fun flushChunk() {
         if (pending.isEmpty()) return
         val n = pending.size
@@ -130,6 +168,14 @@ class TencentAsrBackend(
         }
         pending.clear()
         socket?.send(bytes.toByteString())
+        if (BuildConfig.DEBUG) {
+            sentFrames++
+            val now = System.currentTimeMillis()
+            if (now - sentLogAt >= 2_000L) {
+                sentLogAt = now
+                Log.i(TAG, "sent frames=$sentFrames bytes=$n")
+            }
+        }
     }
 
     override fun finish() {
@@ -167,6 +213,9 @@ class TencentAsrBackend(
             "nonce" to nonce.toString(),
             "secretid" to config.secretId,
             "timestamp" to timestamp.toString(),
+            // 注意：query 必须字典序，签名原文就是按这个顺序拼的。
+            // `vad_silence_time` 要排在 `voice_format` 前面（vad < voi）。
+            "vad_silence_time" to vadSilenceMs.coerceIn(240, 2000).toString(),
             "voice_format" to "1",
             "voice_id" to voiceId,
         )

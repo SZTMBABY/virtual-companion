@@ -613,6 +613,22 @@ fun SettingsScreen(
                     invert = true,
                     onValueChange = { v -> onSettingsChange { it.copy(wake = it.wake.copy(kwsThreshold = v)) } },
                 )
+                SliderRow(
+                    label = "说完判定（秒，越大越不容易被停顿切断）",
+                    value = settings.wake.endpointMs / 1000f,
+                    range = 0.8f..2.4f,
+                    onValueChange = { v ->
+                        onSettingsChange {
+                            it.copy(wake = it.wake.copy(endpointMs = (v * 1000).toLong()))
+                        }
+                    },
+                )
+                Text(
+                    text = "说明：说完判定决定「停顿多久算一句话说完」。调到 1.8 秒以上，" +
+                        "中途换气、想词不会把一句话切成两条；代价是每次回应要多等一会儿。",
+                    color = Color(0xFF5E7A91),
+                    fontSize = 11.sp,
+                )
             }
 
             // ---- 记忆 ----

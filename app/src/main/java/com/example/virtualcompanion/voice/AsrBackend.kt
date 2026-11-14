@@ -28,6 +28,18 @@ interface AsrBackend {
      */
     val needsContinuousAudio: Boolean get() = false
 
+    /**
+     * 后端自己会不会判句末（服务端 VAD / 自己的端点器）。
+     *
+     * 为什么需要这个标志：我们有一条「partial 不再增长就主动收尾」的兜底
+     * （[VoiceEngine.startStabilityWatch]），它对**没有端点能力的后端**（本地
+     * zipformer）是必需的，但对腾讯云是**有害**的 —— 实测日志：
+     * `VoiceEngine: text stable 1800ms → 主动收尾` 出现在
+     * `TencentAsr: final` 之前 123ms，差一点就把整句切掉，而且它发的
+     * `{"type":"end"}` 会让服务端立刻收尾，等于我们用本地计时器替服务端做决定。
+     */
+    val hasServerEndpoint: Boolean get() = false
+
     /** 喂 16kHz 单声道 float PCM。 */
     fun send(samples: FloatArray)
 
