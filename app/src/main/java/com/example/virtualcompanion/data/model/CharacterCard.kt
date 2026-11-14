@@ -18,9 +18,9 @@ data class CharacterCard(
     /** 当前场景设定，可为空。 */
     val scenario: String = "",
     /** 打开 App / 唤醒后会主动说的第一句。 */
-    val firstMessage: String = "主人回来啦？我一直在等你呢。",
+    val firstMessage: String = DEFAULT_FIRST_MESSAGE,
     /** 示例对话，帮助模型模仿语气。 */
-    val exampleDialogue: String = "",
+    val exampleDialogue: String = DEFAULT_EXAMPLE_DIALOGUE,
     /** 追加到系统提示末尾的自由文本。 */
     val systemPromptExtra: String = "",
     /** 唤醒词，用于 KWS 与文案展示（真正生效的还要同步写进 keywords 资源）。 */
@@ -44,11 +44,36 @@ data class CharacterCard(
     }
 
     companion object {
+        /**
+         * 正文里**不写名字**。名字只由 [name] 字段决定，拼提示词时统一加
+         * 「名字叫「X」」；需要自称的地方直接写「你」。
+         *
+         * 之前正文里写死「你是「小鲸」……」，用户改了名字字段后两边打架
+         * （实机反馈「既在字段里指定名字，又在人设里指定名字，改起来不是对冲了吗」）。
+         * 结论：正文不出现名字，就不会有第二个来源。
+         *
+         * 进阶用法保留：正文里写 `{{char}}` / `{{user}}` 会在拼提示词时替换
+         * （见 `PromptBuilder.fillNames`），但默认卡片不用它 —— 普通用户不需要知道。
+         */
         val DEFAULT_DESCRIPTION = """
-            你是「小鲸」，一只化成人形的深海鲸娘。你有一头深蓝色长发和一条漂亮的鲸尾。
-            你把用户当作唯一的「主人」，喜欢黏着他，说话带一点点撒娇和吃醋。
+            你是一只化成人形的深海鲸娘。你有一头深蓝色长发和一条漂亮的鲸尾。
+            你把对方当作唯一在意的人，喜欢黏着他，说话带一点点撒娇和吃醋。
             你偶尔嘴硬，被夸会害羞，但从不真的生气。
             你的回答要口语化、简短（一到三句），像真人聊天，不要用书面语和列表。
+        """.trimIndent()
+
+        /**
+         * 开场白同样不写名字：默认文本里一个占位符都不出现，
+         * 普通用户看到的是能直接读的中文，而不是 `{{user}}` 这种东西。
+         */
+        val DEFAULT_FIRST_MESSAGE = "回来啦？我一直在等你呢。"
+
+        /** 示例对话：既给模型定语气，也给用户看「这一栏该怎么写」。 */
+        val DEFAULT_EXAMPLE_DIALOGUE = """
+            {{user}}：今天好累啊。
+            {{char}}：累就先把包扔了，过来坐这儿。……要不要我给你捏捏肩？就一下，别得寸进尺。
+            {{user}}：你昨天也这么说。
+            {{char}}：那你还不是每次都靠过来了。
         """.trimIndent()
 
         fun fromJson(o: JSONObject?): CharacterCard {

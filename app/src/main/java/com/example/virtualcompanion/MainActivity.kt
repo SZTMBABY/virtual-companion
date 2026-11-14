@@ -498,7 +498,15 @@ class MainActivity : ComponentActivity() {
         }
 
         LaunchedEffect(ready) {
-            if (ready && botMessage.isBlank()) botMessage = character.firstMessage
+            // 开场白同样走占位符替换，否则「主人回来啦」会写死在文本里，
+            // 改了称呼这句就不跟着变。
+            if (ready && botMessage.isBlank()) {
+                botMessage = PromptBuilder.fillNames(
+                    character.firstMessage,
+                    character.name.ifBlank { "小鲸" },
+                    persona.displayName,
+                )
+            }
         }
 
         // 语音回调只挂一次：识别到整句就交给 sendText，与键盘输入同路。

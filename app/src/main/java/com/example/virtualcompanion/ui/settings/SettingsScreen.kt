@@ -400,6 +400,7 @@ fun SettingsScreen(
             Section(
                 // 标题里的名字也要跟着走 —— 写死「小鲸」同样是「两处名字」的坑。
                 title = "角色卡（${character.name.ifBlank { "未命名" }}）",
+                key = "character",
                 snapshot = character,
                 onSave = { onSaveSection("角色卡") },
                 summary = "${character.name.ifBlank { "未命名" }} · 唤醒词「${character.wakeWord.ifBlank { "未设置" }}」",
@@ -416,71 +417,19 @@ fun SettingsScreen(
                             if (old.isEmpty() || fresh.isEmpty() || old == fresh) {
                                 card.copy(name = fresh)
                             } else {
-                                fun swap(text: String) = text.replace(old, fresh)
-                                card.copy(
-                                    name = fresh,
-                                    description = swap(card.description),
-                                    personality = swap(card.personality),
-                                    scenario = swap(card.scenario),
-                                    firstMessage = swap(card.firstMessage),
-                                    exampleDialogue = swap(card.exampleDialogue),
-                                    systemPromptExtra = swap(card.systemPromptExtra),
-                                )
+                                // 默认卡片里正文不含名字，这一步通常是空操作；
+                                // 留它是为了兼容用户自己在正文里写过名字的旧卡。
+                                replaceInBody(card, old, fresh).copy(name = fresh)
                             }
                         }
                     },
                 )
                 Text(
-                    "正文里写 {{char}} 代指她、{{user}} 代指你；用占位符的话，改名不用回头改正文。",
+                    "名字只在上面这一处填，正文里不用再写名字。",
                     color = Color(0xFF6E93AD),
                     fontSize = 11.sp,
                     lineHeight = 15.sp,
                 )
-                // 「名字字段」和「正文里手写的名字」是两份数据，改名后就会打架。
-                // 这里只做检测 + 一键统一，不自动改用户正文（人设是人家自己写的）。
-                val mismatched = remember(character, persona) {
-                    val texts = listOf(
-                        character.description, character.personality, character.scenario,
-                        character.firstMessage, character.exampleDialogue, character.systemPromptExtra,
-                    ).joinToString("\n")
-                    val current = character.name.trim()
-                    val userCall = persona.displayName.trim()
-                    Regex("「([^」\\n]{2,6})」").findAll(texts)
-                        .map { it.groupValues[1].trim() }
-                        .filter { it.isNotEmpty() && it != current && it != userCall }
-                        .groupingBy { it }.eachCount()
-                        .entries.sortedByDescending { it.value }
-                        .map { it.key }
-                        .take(2)
-                }
-                if (mismatched.isNotEmpty()) {
-                    Text(
-                        "正文里还写着「${mismatched.joinToString("」「")}」，和上面这个名字对不上。",
-                        color = Color(0xFFE0B25F),
-                        fontSize = 11.sp,
-                        lineHeight = 15.sp,
-                    )
-                    mismatched.forEach { stale ->
-                        Text(
-                            "把正文里的「$stale」都改成「${character.name.ifBlank { "未命名" }}」",
-                            color = Color(0xFF7FB2D6),
-                            fontSize = 11.sp,
-                            modifier = Modifier.clickable {
-                                onCharacterChange { card ->
-                                    fun swap(text: String) = text.replace(stale, card.name.trim())
-                                    card.copy(
-                                        description = swap(card.description),
-                                        personality = swap(card.personality),
-                                        scenario = swap(card.scenario),
-                                        firstMessage = swap(card.firstMessage),
-                                        exampleDialogue = swap(card.exampleDialogue),
-                                        systemPromptExtra = swap(card.systemPromptExtra),
-                                    )
-                                }
-                            },
-                        )
-                    }
-                }
                 TextFieldRow(
                     label = "唤醒词",
                     value = character.wakeWord,
@@ -504,7 +453,6 @@ fun SettingsScreen(
                     onCommit = { v -> onCharacterChange { it.copy(firstMessage = v) } },
                 )
             }
-
             // ---- 主人 ----
             Section(
                 title = "主人角色卡",
@@ -809,6 +757,14 @@ private fun Section(
     summary: String = "",
     defaultExpanded: Boolean = false,
     /**
+     * 这一组的稳定标识，用于 remember / rememberSaveable。
+     *
+     * 不能直接用 [title]：角色卡标题会跟着名字变（`角色卡（小鲸）` → `角色卡（小爱）`），
+     * 标题一变，所有以 title 为 key 的状态都会重置 —— 实测表现为
+     * 「改完名字，这一组自己收起来了，保存按钮也不见了」。
+     */
+    key: Any? = title,
+    /**
      * 本组设置的当前快照，用来判断「用户改过没有」。
      * 传 null 表示这组不需要保存按钮（比如「关于」）。
      *
@@ -821,14 +777,14 @@ private fun Section(
     onSave: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
-    var expanded by rememberSaveable(title) { mutableStateOf(defaultExpanded) }
+    var expanded by rememberSaveable(key) { mutableStateOf(defaultExpanded) }
     // 首次进入时的值就是基线；后续和它不同即视为「改过」。
-    var baseline by remember(title) { mutableStateOf(snapshot) }
-    var savedAt by remember(title) { mutableStateOf(0L) }
+    var baseline by remember(key) { mutableStateOf(snapshot) }
+    var savedAt by remember(key) { mutableStateOf(0L) }
     val dirty = snapshot != null && baseline != snapshot
     // 从「没改」变成「改过」时自动展开一次：用户可能是在收起状态下改的
     // （比如点了保存按钮之外的地方），不展开就看不到保存按钮。
-    var wasDirty by remember(title) { mutableStateOf(false) }
+    var wasDirty by remember(key) { mutableStateOf(false) }
     LaunchedEffect(dirty) {
         if (dirty && !wasDirty) expanded = true
         wasDirty = dirty
@@ -1119,3 +1075,17 @@ private fun LabeledChips(
  */
 private fun Modifier.onFocusChangedCompat(block: (Boolean) -> Unit): Modifier =
     this.onFocusChanged { block(it.isFocused) }
+
+/** 把正文六个字段里的 [from] 替换成 [to]（改名同步、转占位符都用它）。 */
+private fun replaceInBody(card: CharacterCard, from: String, to: String): CharacterCard {
+    if (from.isEmpty()) return card
+    fun swap(t: String) = t.replace(from, to)
+    return card.copy(
+        description = swap(card.description),
+        personality = swap(card.personality),
+        scenario = swap(card.scenario),
+        firstMessage = swap(card.firstMessage),
+        exampleDialogue = swap(card.exampleDialogue),
+        systemPromptExtra = swap(card.systemPromptExtra),
+    )
+}

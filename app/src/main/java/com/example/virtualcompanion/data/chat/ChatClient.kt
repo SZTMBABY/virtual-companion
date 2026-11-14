@@ -376,7 +376,7 @@ object PromptBuilder {
      * 单一口径的做法是正文写 `{{char}}` / `{{user}}`，拼提示词时现替换。
      * 兼容大小写与全角括号，避免用户写成 `{{Char}}` 就失效。
      */
-    private fun fillNames(text: String, charName: String, userName: String): String =
+    fun fillNames(text: String, charName: String, userName: String): String =
         text.replace("{{char}}", charName).replace("{{Char}}", charName).replace("{{CHAR}}", charName)
             .replace("{{user}}", userName).replace("{{User}}", userName).replace("{{USER}}", userName)
 
