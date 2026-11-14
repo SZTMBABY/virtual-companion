@@ -37,3 +37,4 @@ local.properties
 # Runtime output
 /shots/*.png
 !/shots/.gitkeep
+/.tmp_probe

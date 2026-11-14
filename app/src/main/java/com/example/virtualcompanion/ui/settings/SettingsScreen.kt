@@ -27,6 +27,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,6 +40,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.virtualcompanion.data.chat.ChatClient
@@ -145,7 +147,14 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             // ---- 大模型 ----
-            Section(title = "大模型（OpenAI 兼容协议）") {
+            Section(
+                title = "大模型（OpenAI 兼容协议）",
+                summary = buildString {
+                    append(settings.llm.model.ifBlank { "未填模型名" })
+                    append(if (settings.llm.isConfigured) " · 已填 Key" else " · 未填 Key")
+                },
+                defaultExpanded = true,
+            ) {
                 TextFieldRow(
                     label = "Base URL",
                     value = settings.llm.baseUrl,
@@ -338,7 +347,10 @@ fun SettingsScreen(
             }
 
             // ---- 角色 ----
-            Section(title = "角色卡（小鲸）") {
+            Section(
+                title = "角色卡（小鲸）",
+                summary = "${character.name.ifBlank { "未命名" }} · 唤醒词「${character.wakeWord.ifBlank { "未设置" }}」",
+            ) {
                 TextFieldRow(
                     label = "名字",
                     value = character.name,
@@ -370,7 +382,7 @@ fun SettingsScreen(
             }
 
             // ---- 主人 ----
-            Section(title = "主人角色卡") {
+            Section(title = "主人角色卡", summary = persona.displayName) {
                 TextFieldRow(
                     label = "称呼",
                     value = persona.name,
@@ -391,7 +403,10 @@ fun SettingsScreen(
             }
 
             // ---- 显示 ----
-            Section(title = "显示") {
+            Section(
+                title = "显示",
+                summary = if (settings.display.halfBody) "半身模式" else "全身模式",
+            ) {
                 SwitchRow(
                     label = "半身模式",
                     hint = "只留头与上半身，小屏上脸更大",
@@ -413,7 +428,10 @@ fun SettingsScreen(
             }
 
             // ---- 模型文件 ----
-            Section(title = "Live2D 模型") {
+            Section(
+                title = "Live2D 模型",
+                summary = character.live2dModelEntry.ifBlank { "未导入" },
+            ) {
                 Text(
                     text = "当前模型：${character.live2dModelEntry.ifBlank { "未导入" }}",
                     color = Color(0xFF9FC6E0),
@@ -433,7 +451,14 @@ fun SettingsScreen(
             }
 
             // ---- 语音 ----
-            Section(title = "语音（ASR / TTS）") {
+            Section(
+                title = "语音（ASR / TTS）",
+                summary = buildString {
+                    append(if (settings.asrEngine == AsrEngine.CLOUD_TENCENT) "云端腾讯" else "离线本地")
+                    append(" · TTS ")
+                    append(if (settings.tts.isConfigured) "已配" else "未配")
+                },
+            ) {
                 Text("ASR 引擎", color = Color(0xFF9FC6E0), fontSize = 12.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     PillButton(
@@ -497,7 +522,14 @@ fun SettingsScreen(
             }
 
             // ---- 唤醒 ----
-            Section(title = "唤醒") {
+            Section(
+                title = "唤醒",
+                summary = when {
+                    !settings.wake.wakeEnabled -> "已关闭"
+                    settings.wake.backgroundWakeEnabled -> "前台 + 后台常驻"
+                    else -> "仅前台"
+                },
+            ) {
                 SwitchRow(
                     label = "语音唤醒",
                     hint = "说出「${character.wakeWord}」即可唤醒",
@@ -522,7 +554,10 @@ fun SettingsScreen(
             }
 
             // ---- 记忆 ----
-            Section(title = "记忆") {
+            Section(
+                title = "记忆",
+                summary = "$memoryCount 条对话 · ${memoryRules.size} 条偏好",
+            ) {
                 Text(
                     text = "已记住 $memoryCount 条对话。说「记住……」会被永久保留。",
                     color = Color(0xFF9FC6E0),
@@ -578,7 +613,7 @@ fun SettingsScreen(
             }
 
             // ---- 关于 ----
-            Section(title = "关于") {
+            Section(title = "关于", summary = "v0.1") {
                 Text(
                     text = "虚拟伴侣 v0.1 · 本地运行，不收集任何数据",
                     color = Color(0xFF9FC6E0),
@@ -604,18 +639,56 @@ fun SettingsScreen(
     }
 }
 
+/**
+ * 可折叠的分组卡片。
+ *
+ * 九个分组平铺时一屏只放得下两组，用户抱怨「设置太繁琐」（m03881），
+ * 所以改成点标题展开：收起时只占一行，并在右侧显示当前状态摘要
+ * （例如大模型分组显示当前模型名，不用展开也能一眼看到配的是哪个）。
+ *
+ * 展开状态用 rememberSaveable 记住，旋转屏幕不会折叠回去。
+ */
 @Composable
-private fun Section(title: String, content: @Composable () -> Unit) {
+private fun Section(
+    title: String,
+    summary: String = "",
+    defaultExpanded: Boolean = false,
+    content: @Composable () -> Unit,
+) {
+    var expanded by rememberSaveable(title) { mutableStateOf(defaultExpanded) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(Color(0xFF12212F))
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(if (expanded) 8.dp else 0.dp),
     ) {
-        Text(title, color = Color(0xFF7FB7E0), fontSize = 12.sp)
-        content()
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(title, color = Color(0xFF7FB7E0), fontSize = 12.sp)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = summary,
+                color = Color(0xFF5E7A91),
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = if (expanded) "收起 ▴" else "展开 ▾",
+                color = Color(0xFF5E91B5),
+                fontSize = 10.sp,
+            )
+        }
+        if (expanded) content()
     }
 }
 
