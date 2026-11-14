@@ -290,6 +290,17 @@
     document.getElementById('stage').appendChild(app.view);
     applyCanvasSize(W, H);
 
+    // 限制到 24fps。
+    //
+    // 这台机器（MT6761 + PowerVR GE8300）在 640×480 / 480×640 上跑满 60fps 会因为
+    // 贴图带宽吃紧而抖动，肉眼反而不如稳定 24。`PIXI.Ticker.shared` 同时驱动
+    // `_render()` 和 `autoUpdate`（→ internalModel.update），所以只调它的 maxFPS
+    // 就能让「渲染」和「模型动画」一起降速，不会出现画面 24fps 而动作 60fps 的撕裂。
+    var MAX_FPS = parseFloat(params.get('fps') || '24');
+    if (!isFinite(MAX_FPS) || MAX_FPS < 1) MAX_FPS = 24;
+    PIXI.Ticker.shared.maxFPS = MAX_FPS;
+    log('L2D fps cap=' + MAX_FPS);
+
     // 只做 FPS 统计；参数写入全部交给 onBeforeModelUpdate。
     var fpsAcc = 0, fpsLast = 0;
     PIXI.Ticker.shared.add(function () {
