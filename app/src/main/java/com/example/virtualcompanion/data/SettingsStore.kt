@@ -82,9 +82,18 @@ class SettingsStore(private val context: Context) {
     }
 
     fun updateCharacter(block: (CharacterCard) -> CharacterCard) {
-        val next = block(_character.value)
+        val before = _character.value
+        val next = block(before)
+        // 同一个值被提交两次很常见：失焦提交 + 离开页面兜底提交都会触发。
+        // 不去重就会多一次状态发射（重组 + 落盘），没有意义。
+        if (next == before) return
         _character.value = next
         prefs.edit().putString(KEY_CHARACTER, next.toJson().toString()).apply()
+        // 「改名后角色不认新名字」这类问题，第一步永远是确认改名有没有真的落到状态里。
+        android.util.Log.i(
+            "CardStore",
+            "character: name '${before.name}' → '${next.name}' (wake '${next.wakeWord}')",
+        )
     }
 
     companion object {

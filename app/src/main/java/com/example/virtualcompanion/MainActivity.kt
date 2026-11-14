@@ -321,6 +321,10 @@ class MainActivity : ComponentActivity() {
         fun sendText(text: String) {
             val clean = text.trim()
             if (clean.isEmpty()) return
+            android.util.Log.i(
+                "CardStore",
+                "sendText: card='${character.name}' wake='${character.wakeWord}' persona='${persona.displayName}'",
+            )
             // 先掐掉上一条（用户连发时不该两条一起念）
             replyJob?.cancel()
             speaker.cancel()

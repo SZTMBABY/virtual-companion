@@ -19,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
@@ -27,7 +28,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -831,7 +834,11 @@ private fun Section(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     if (dirty) {
+                        // 先清焦点：文本框是「草稿 + 失焦提交」，点按钮不会自动失焦，
+                        // 不清焦点就会「保存了旧值、输入框里还是新值」。
+                        val focus = LocalFocusManager.current
                         PillButton(text = "保存本组", onClick = {
+                            focus.clearFocus()
                             onSave?.invoke()
                             baseline = snapshot
                             savedAt = System.currentTimeMillis()
@@ -876,6 +883,8 @@ private fun TextFieldRow(
             if (draft.isEmpty()) {
                 Text(placeholder, color = Color(0xFF44586B), fontSize = 13.sp)
             }
+            // 兜底提交，理由见 CommitOnDispose 的注释。
+            CommitOnDispose(draft, value, onCommit)
             BasicTextField(
                 value = draft,
                 onValueChange = { draft = it },
@@ -913,6 +922,9 @@ private fun TextAreaRow(label: String, value: String, onCommit: (String) -> Unit
                 .background(Color(0xFF0A1622))
                 .padding(horizontal = 10.dp, vertical = 8.dp),
         ) {
+            // 兜底：页面被关掉（返回键 / 点别处离开设置）时不一定有失焦事件，
+            // 不提交就等于「用户改了名字，返回后还是旧名字」。
+            CommitOnDispose(draft, value, onCommit)
             BasicTextField(
                 value = draft,
                 onValueChange = { draft = it },
@@ -1088,4 +1100,25 @@ private fun replaceInBody(card: CharacterCard, from: String, to: String): Charac
         exampleDialogue = swap(card.exampleDialogue),
         systemPromptExtra = swap(card.systemPromptExtra),
     )
+}
+
+/**
+ * 离开组合时把未提交的草稿交出去。
+ *
+ * 文本框是「本地草稿 + 失焦提交」（为了不每敲一个字就写 SharedPreferences）。
+ * 但失焦事件不一定发生 —— 比如用户直接按返回键离开设置页，节点被销毁但没有
+ * `onFocusChanged(false)`，草稿就丢了。表现是：改了名字、回到聊天，角色还是旧名字。
+ *
+ * 用 rememberUpdatedState 取最新值，避免 onDispose 里拿到创建时的旧闭包。
+ */
+@Composable
+private fun CommitOnDispose(draft: String, value: String, onCommit: (String) -> Unit) {
+    val latestDraft by rememberUpdatedState(draft)
+    val latestValue by rememberUpdatedState(value)
+    val latestCommit by rememberUpdatedState(onCommit)
+    DisposableEffect(Unit) {
+        onDispose {
+            if (latestDraft != latestValue) latestCommit(latestDraft)
+        }
+    }
 }
