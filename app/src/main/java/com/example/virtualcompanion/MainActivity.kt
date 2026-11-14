@@ -236,6 +236,24 @@ class MainActivity : ComponentActivity() {
         }
 
         /**
+         * 判断一条检索预览是否已经出现在内核投影的上下文里。
+         *
+         * 用滑动窗口（shingle）而不是整串相等：预览带标题、投影不带，
+         * 整串比对恒为 false，去重会失效（实测就是这样漏掉的）。
+         */
+        fun isProjected(preview: String, projected: String): Boolean {
+            if (projected.isEmpty()) return false
+            val w = 12
+            if (preview.length < w) return projected.contains(preview)
+            var i = 0
+            while (i + w <= preview.length) {
+                if (projected.contains(preview.substring(i, i + w))) return true
+                i += w
+            }
+            return false
+        }
+
+        /**
          * 拼「长期记忆」片段：用户明确要求记住的偏好 + 内核检索命中的旧记忆。
          *
          * 注意这里**不拼摘要**——折叠掉的对话已经由内核投影成 wire 最前面那条
@@ -246,21 +264,36 @@ class MainActivity : ComponentActivity() {
             val rules = runCatching { container.memory.rules() }.getOrDefault(emptyList())
             val hits = runCatching { container.memory.search(query) }.getOrDefault(emptyList())
             if (rules.isEmpty() && hits.isEmpty()) return ""
+
+            // 去重：内核投影到 wire 的首条就是折叠摘要，它已经在 prompt 里了。
+            // 检索命中的预览是「标题 + 摘要」拼起来的，整串比对永远不相等
+            // （标题不在 wire 里），所以用 shingle 重叠判定：
+            // 任意一个 12 字窗口能在投影文本里找到，就认为这条记忆已在上下文里，
+            // 不再重复拼 —— 否则同一份记忆会注入两次，既浪费 token，
+            // 也会让模型误以为某件事被反复强调过。
+            val projected = runCatching { container.memory.project() }
+                .getOrDefault(emptyList())
+                .joinToString("\u0001") { it.text }
+            val fresh = hits
+                .map { it.preview.replace('\n', ' ').trim() }
+                .filter { it.isNotBlank() }
+                .filterNot { preview -> isProjected(preview, projected) }
+
+            if (rules.isEmpty() && fresh.isEmpty()) return ""
             return buildString {
                 if (rules.isNotEmpty()) {
                     appendLine("【必须遵守的用户偏好】")
                     rules.forEach { appendLine("- ${it.text}") }
                 }
-                if (hits.isNotEmpty()) {
+                if (fresh.isNotEmpty()) {
                     if (rules.isNotEmpty()) appendLine()
                     appendLine("【相关旧记忆】")
-                    hits.take(4).forEach { h ->
-                        val head = h.preview.replace('\n', ' ').trim()
-                        if (head.isNotBlank()) appendLine("- $head")
-                    }
+                    fresh.take(4).forEach { appendLine("- $it") }
                 }
             }.trim()
         }
+
+
 
         /**
          * 一条用户输入（文字或语音）→ 请求大模型 → 流式字幕 + 表情 + 落盘。
@@ -297,19 +330,69 @@ class MainActivity : ComponentActivity() {
                     .onFailure { android.util.Log.w("Memory", "project failed: ${it.message}") }
                     .getOrDefault(emptyList())
 
-                // 排除刚落的这一条：buildMessages 末尾还会再追加 userInput。
+                // 内核投影出来的前几条是折叠摘要（role=system，正文以
+                // `[Compressed conversation section]` 开头）。它们**就是记忆本身**，
+                // 必须原样进 prompt —— 之前这里只留 user/assistant，
+                // 等于把内核压出来的全部记忆扔掉了（实测 wire 里 10 条摘要一条没进）。
+                val summaries = wire.filter { it.role == "system" }
                 val history = wire
                     .filterNot { it.ref == currentRef }
                     .filter { it.role == "user" || it.role == "assistant" }
                     .map { ChatMessage(role = it.role, content = it.text, seq = it.ref) }
 
                 // 检索相关旧记忆 + 长期偏好，拼成 system 片段。
-                val memoryCtx = buildMemoryContext(clean)
+                val memoryCtx = buildString {
+                    if (summaries.isNotEmpty()) {
+                        appendLine("【更早的对话摘要】")
+                        summaries.forEach { appendLine("- ${it.text.replace('\n', ' ').trim()}") }
+                    }
+                    val extra = buildMemoryContext(clean)
+                    if (extra.isNotBlank()) {
+                        if (isNotEmpty()) appendLine()
+                        append(extra)
+                    }
+                }.trim()
                 if (BuildConfig.DEBUG) {
                     android.util.Log.i(
                         "Memory",
                         "ctx ${memoryCtx.length}字 wire=${wire.size} hist=${history.size}",
                     )
+                    // 证明「记忆真的进了 prompt」而不是靠上下文。
+                    // 关键：探针必须用「原句片段」，不能用词。用词会被摘要误命中——
+                    // 摘要里本来就含「西湖/冰美式」这类词，那样测出来永远是 true。
+                    // 这里用原文里的长片段：摘要只保留"事实"，不会逐字复述原句。
+                    val wireText = wire.joinToString("\u0001") { it.text }
+                    val probes = listOf(
+                        "下周三要去上海出差三天",
+                        "住在杭州余杭区",
+                        "周末约了朋友去西湖边吃片儿川",
+                        "做后端开发",
+                    )
+                    val hitFlags = probes.joinToString(",") { p ->
+                        "$p=${wireText.contains(p)}"
+                    }
+                    android.util.Log.i(
+                        "MemProof",
+                        "wireVerbatim[$hitFlags] wireMsgs=${wire.size} " +
+                            "wireChars=${wireText.length} memCtxLen=${memoryCtx.length}",
+                    )
+                    if (memoryCtx.isNotBlank()) {
+                        android.util.Log.i("MemProof", "memCtx=[${memoryCtx.replace('\n', '|')}]")
+                    }
+                    wire.firstOrNull()?.let {
+                        android.util.Log.i(
+                            "MemProof",
+                            "wireHead role=${it.role} text=${it.text.take(80).replace('\n', '|')}",
+                        )
+                    }
+                    // 全量转储：只看首尾会漏掉「摘要里有没有那条事实」。
+                    // 每行一条，前 60 字，便于人工核对哪条记忆真的进了 prompt。
+                    wire.forEachIndexed { i, m ->
+                        android.util.Log.i(
+                            "MemWire",
+                            "[$i] ${m.role} r=${m.ref} ${m.text.take(60).replace('\n', '|')}",
+                        )
+                    }
                 }
 
                 val messages = PromptBuilder.buildMessages(

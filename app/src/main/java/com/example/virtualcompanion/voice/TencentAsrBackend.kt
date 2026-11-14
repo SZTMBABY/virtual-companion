@@ -211,26 +211,36 @@ class TencentAsrBackend(
                 return
             }
 
+            // 腾讯云实时语音识别的真实响应结构（2026-11-14 用独立 Python 客户端实测）：
+            //   {"code":0,"message":"success","result":{"slice_type":1,"index":0,
+            //     "start_time":0,"end_time":3500,"voice_text_str":"小晶今天天气怎么样",...}}
+            // slice_type 在 result **里面**，文本是 result.voice_text_str；
+            // 顶层既没有 slice_type 也没有 result 数组。早期版本按顶层
+            // o.optInt("slice_type") + result.optJSONArray("result") 解析，
+            // 两个都拿到空值 → 所有识别结果被静默丢弃，表现为「能唤醒但说什么都识别不出」。
             val result = o.optJSONObject("result") ?: return
-            val sliceType = o.optInt("slice_type", 0)
-            val segs = result.optJSONArray("result")
-            val piece = buildString {
-                if (segs != null) {
-                    for (i in 0 until segs.length()) {
-                        append(segs.getJSONObject(i).optString("result", ""))
-                    }
+            val sliceType = result.optInt("slice_type", 0)
+
+            // 没有 result 字段但带 final:1 的是整段结束信号，放行给下面的收尾逻辑。
+            if (!result.has("voice_text_str")) {
+                if (o.optInt("final", 0) == 1 && !settled) {
+                    settled = true
+                    val last = sentences.toString().trim()
+                    Log.i(TAG, "final: '$last'")
+                    onFinal?.invoke(last)
                 }
+                return
             }
+
+            // voice_text_str 是「到目前为止」的整句，不是增量分片，直接覆盖。
+            val piece = result.optString("voice_text_str", "").trim()
             if (piece.isNotBlank()) {
-                // slice_type: 0=起始 1=中间 2=结束
-                if (sliceType == 1) sentences.append(piece)
-                val sofar = sentences.toString() + if (sliceType == 1) "" else piece
-                if (sofar.isNotBlank()) onPartial?.invoke(sofar)
+                onPartial?.invoke(piece)
             }
 
             if (sliceType == 2 && !settled) {
                 settled = true
-                val final = sentences.toString().ifBlank { piece }
+                val final = piece.ifBlank { sentences.toString().trim() }
                 Log.i(TAG, "final: '$final'")
                 onFinal?.invoke(final)
             }

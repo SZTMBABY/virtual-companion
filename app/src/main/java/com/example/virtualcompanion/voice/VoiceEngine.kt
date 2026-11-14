@@ -240,6 +240,17 @@ class VoiceEngine(
             enterIdle("endSpeaking but idle")
             return
         }
+        // 播报时 beginSpeaking() 把麦克风关了（否则自家 TTS 会被 KWS 反复唤醒，
+        // 实测 AEC 能压一部分但压不干净）。这里必须把麦克风重新开起来，
+        // 否则第二轮永远收不到音频 —— 症状是「第一轮正常，之后再也唤不醒」，
+        // 而且 logcat 里连 mic frames 都不再打印，很容易误判成 KWS 坏了。
+        if (!capture.isRunning) {
+            kws.reset()
+            val ok = capture.start(onFrame = ::onFrame, onError = { msg ->
+                Log.e(TAG, "capture error: $msg")
+            })
+            Log.i(TAG, "mic back on ok=$ok")
+        }
         openBackend()
         setState(State.AWAKE)
         armSilenceTimer()
@@ -292,6 +303,35 @@ class VoiceEngine(
      * 建连期间到达的音频帧不能丢（否则一句话开头 200–400ms 被砍掉，首字经常听不清），
      * 先塞进 [preBuffer]，就绪后一次性冲进去。
      */
+    /**
+     * 给后端统一绑回调。
+     *
+     * [LocalAsrBackend] 在类内部自己实现，但云端后端是 `cloudAsrFactory`
+     * 每次现 new 出来的，工厂那边拿不到状态机 —— 不在这里绑，
+     * 陈云端的结果就全部落到空回调上。实测症状：`TencentAsr: connected`
+     * 之后一条 partial/final 都没有，用户表现为「能唤醒但说什么都识别不出」。
+     */
+    private fun bindCallbacks(b: AsrBackend) {
+        b.onPartial = { text ->
+            val clean = text.trim()
+            if (clean.isNotBlank()) {
+                _ui.value = _ui.value.copy(partialText = clean)
+                // 有内容就重置静默计时，否则用户还在说话就被判超时了。
+                armSilenceTimer()
+            }
+        }
+        b.onFinal = { text -> handleFinalText(text) }
+        b.onError = { msg ->
+            Log.w(TAG, "asr error: $msg")
+            // 云端挂了不要直接把整个状态机打成 ERROR：
+            // 先降级本地再试一次，本地也失败才真的是错。
+            if (b === backend) {
+                cloudFailed = true
+                _ui.value = _ui.value.copy(message = msg)
+            }
+        }
+    }
+
     private fun openBackend() {
         backend?.close()
         backend = null
@@ -336,6 +376,11 @@ class VoiceEngine(
                 b.close()
                 return@launch
             }
+
+            // 回调必须在这里统一绑定：LocalAsrBackend 在类内部自带实现，
+            // 而 TencentAsrBackend 是工厂每次 new 出来的，不绑就永远收不到结果
+            // （实测表现为「云端 connected 了，但一条 partial/final 都没有」）。
+            bindCallbacks(b)
 
             synchronized(frameLock) {
                 backend = b

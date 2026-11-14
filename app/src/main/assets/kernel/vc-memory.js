@@ -221,12 +221,55 @@ export function status() {
 
 export function exportState() { return stateJson || ''; }
 
+/**
+ * 老块摘要是整串 JSON 的清洗。
+ *
+ * 早期版本的兜底分支会把解析失败的模型输出原样当摘要存下去，结果是
+ * `{"summary":"...","topic":"..."}` 这串东西直接进了 wire 和检索结果。
+ * 它比正文还长（压缩比反弹到 100% 以上），而且模型读到的是带花括号的噪声。
+ * 这里在读写 state 的边界上统一剥一层，把历史遗留的脏数据修好。
+ */
+function sanitizeBlocks() {
+  var n = 0;
+  var blocks = (state && state.blocks) || [];
+  for (var i = 0; i < blocks.length; i++) {
+    var b = blocks[i];
+    var s = String(b.summary || '');
+    if (s.charAt(0) !== '{' || s.indexOf('"summary"') < 0) continue;
+    try {
+      var o = JSON.parse(s);
+      if (o && typeof o.summary === 'string' && o.summary) {
+        b.summary = o.summary;
+        if ((!b.topic || !String(b.topic).trim()) && typeof o.topic === 'string') b.topic = o.topic;
+        n++;
+      }
+    } catch (e) {
+      // 非法 JSON：退化为正则抠 summary 值
+      var m = s.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (m && m[1]) {
+        b.summary = m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+        n++;
+      }
+    }
+  }
+  if (n > 0) {
+    stateJson = JSON.stringify(state);
+    try {
+      if (typeof window !== 'undefined' && window.console) {
+        window.console.log('[VCMemory] sanitized ' + n + ' json-wrapped summaries');
+      }
+    } catch (e) {}
+  }
+  return n;
+}
+
 export function importState(json) {
   try {
     state = json ? JSON.parse(json) : K.createInitialState();
     stateJson = JSON.stringify(state);
     ensure();
-    return JSON.stringify({ ok: true, blocks: (state.blocks || []).length });
+    var cleaned = sanitizeBlocks();
+    return JSON.stringify({ ok: true, blocks: (state.blocks || []).length, cleaned: cleaned });
   } catch (e) {
     return JSON.stringify({ ok: false, error: String((e && e.message) || e) });
   }
