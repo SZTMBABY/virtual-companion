@@ -111,7 +111,12 @@ class VoiceEngine(
     }
 
     fun start() {
-        if (running) return
+        if (running) {
+            // 已经启动过但麦克风死了（退到后台被杀 / 被别的 App 抢占）。
+            // 直接 return 会让「再点一次麦克风」变成空操作。
+            reopenMicIfNeeded()
+            return
+        }
         running = true
 
         // 模型加载 + 开麦必须在后台线程：KWS 的 5.4MB onnx 首次解析约 4–6 秒，
@@ -233,28 +238,66 @@ class VoiceEngine(
         Log.i(TAG, "→ SPEAKING (mic off)")
     }
 
+    /**
+     * 确保麦克风在采集。
+     *
+     * 为什么单独抽出来：`beginSpeaking()` 会主动关麦（否则自家 TTS 会被 KWS 反复唤醒，
+     * 实测 AEC 能压一部分但压不干净），而**关麦之后有三条路径要把它打开**：
+     * ①正常播完（endSpeaking）②播完后状态已经不是 AWAKE（endSpeaking 的兜底分支）
+     * ③看门狗发现「应该在听却不在采」。之前只有 ① 开了麦，
+     * ②③ 会让麦克风永久关着 —— 症状就是「一次之后再也唤不醒，只能杀进程」。
+     *
+     * 重开前必须 `kws.reset()`：采集停掉期间 KWS 特征流里还留着上一轮的音帧，
+     * 不清掉会把下一轮的词切碎。
+     */
+    private fun reopenMicIfNeeded(): Boolean {
+        if (capture.isRunning) return true
+        kws.reset()
+        val ok = capture.start(onFrame = ::onFrame, onError = { msg ->
+            Log.e(TAG, "capture error: $msg")
+        })
+        Log.i(TAG, "mic back on ok=$ok")
+        return ok
+    }
+
     /** TTS 播完调用：回到 Awake 继续听，重新起 8 秒计时。 */
     fun endSpeaking() {
         if (!running) return
+        // 先把麦开回来，再判断状态。
+        // 顺序反了会走进死路：曾经 `!awake` 分支直接 return，麦就一直关着，
+        // 而 start() 又被 `if (running) return` 挡住，只能杀进程才能恢复。
+        reopenMicIfNeeded()
         if (!awake) {
             enterIdle("endSpeaking but idle")
             return
-        }
-        // 播报时 beginSpeaking() 把麦克风关了（否则自家 TTS 会被 KWS 反复唤醒，
-        // 实测 AEC 能压一部分但压不干净）。这里必须把麦克风重新开起来，
-        // 否则第二轮永远收不到音频 —— 症状是「第一轮正常，之后再也唤不醒」，
-        // 而且 logcat 里连 mic frames 都不再打印，很容易误判成 KWS 坏了。
-        if (!capture.isRunning) {
-            kws.reset()
-            val ok = capture.start(onFrame = ::onFrame, onError = { msg ->
-                Log.e(TAG, "capture error: $msg")
-            })
-            Log.i(TAG, "mic back on ok=$ok")
         }
         openBackend()
         setState(State.AWAKE)
         armSilenceTimer()
         Log.i(TAG, "→ AWAKE (tts done)")
+    }
+
+    /**
+     * 看门狗：发现「理应在监听却不在采集」时把麦克风救回来。
+     *
+     * 真机上出现过「跑几轮后彻底唤不醒」——状态是 IDLE、running 是 true、
+     * 但 AudioRecord 已经死了（可能被系统回收或被别的 App 抢占）。
+     * 这种情况下没有任何回调会告诉我们，只能主动探活。
+     *
+     * 刻意跳过 SPEAKING：那段是故意关麦的，不能判成故障。
+     */
+    fun watchdogTick() {
+        if (!running) return
+        // 还没 ready 说明 start() 正在后台建模型/开麦，此时插手会与它抢麦克风。
+        if (!_ui.value.ready) return
+        if (_ui.value.state == State.SPEAKING) return
+        if (capture.isRunning) return
+        Log.w(TAG, "watchdog: mic is dead while ${_ui.value.state}, reopening")
+        if (reopenMicIfNeeded()) {
+            openBackend()
+        } else {
+            _ui.value = _ui.value.copy(state = State.ERROR, message = "麦克风被占用，点一下麦克风重试")
+        }
     }
 
     fun beginThinking() {

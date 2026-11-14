@@ -512,6 +512,16 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // 看门狗：真机上出现过「跑几轮后彻底唤不醒」——
+        // 状态是 IDLE、running 是 true，但 AudioRecord 已经死了（被系统回收或被别的 App 抢占），
+        // 这种情况没有任何回调会通知我们。每 5 秒主动探活一次。
+        LaunchedEffect(Unit) {
+            while (true) {
+                delay(5_000)
+                if (voiceStarted) voice.watchdogTick()
+            }
+        }
+
         // 云端 ASR 工厂：密钥随时可改，所以每次设置变动都重新挂。
         // 返回 null 表示「云端不可用」，VoiceEngine 会自动落本地。
         LaunchedEffect(settings.tencentAsr) {
@@ -548,13 +558,22 @@ class MainActivity : ComponentActivity() {
             if (!micGranted) micLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
 
-        // 前台才开麦：退到后台就停，省电也避免占用麦克风（后台常驻是 p6 的开关，默认关）
+        // 前台才开麦：退到后台就停，省电也避免占用麦克风（后台常驻是 p6 的开关，默认关）。
+        //
+        // 注意 ON_START 必须把引擎启回来。最早的写法只在
+        // `LaunchedEffect(micGranted, settings.wake, settings.asrEngine)` 里启动一次，
+        // 而 ON_STOP 把 voiceStarted 置回 false —— 那两个 key 没变，LaunchedEffect 不会重跑，
+        // 结果「切后台再回来」之后引擎永远是停的，喊唤醒词毫无反应，只能杀进程重开。
         DisposableEffect(lifecycleOwner) {
             val observer = LifecycleEventObserver { _, event ->
                 if (event == Lifecycle.Event.ON_STOP && voiceStarted) {
                     voice.stop()
                     speaker.stop()
                     voiceStarted = false
+                }
+                if (event == Lifecycle.Event.ON_START && micGranted && !voiceStarted) {
+                    voice.start()
+                    voiceStarted = true
                 }
             }
             lifecycleOwner.lifecycle.addObserver(observer)

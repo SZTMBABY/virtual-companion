@@ -44,6 +44,13 @@ class AudioCapture(
     var sourceUsed: Int = -1
         private set
 
+    /**
+     * `@Synchronized` 是必须的：VoiceEngine 的看门狗（主线程）与启动流程（IO 线程）
+     * 会几乎同时调进来，两边都读到 `running == false` 就各建一个 AudioRecord，
+     * 于是两个采集线程抢同一个麦克风 —— 真机实测表现为日志里出现两次
+     * `AudioCapture: started`，然后 KWS 再也收不到完整帧。
+     */
+    @Synchronized
     @SuppressLint("MissingPermission") // 调用方（VoiceEngine / Activity）负责申请 RECORD_AUDIO
     fun start(onFrame: (FloatArray) -> Unit, onError: (String) -> Unit = {}): Boolean {
         if (running) return true
@@ -131,6 +138,7 @@ class AudioCapture(
         return true
     }
 
+    @Synchronized
     fun stop() {
         if (!running && thread == null) return
         running = false
