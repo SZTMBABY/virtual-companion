@@ -1,0 +1,257 @@
+package com.example.virtualcompanion.voice
+
+import android.util.Base64
+import android.util.Log
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import okio.ByteString
+import okio.ByteString.Companion.toByteString
+import org.json.JSONObject
+import java.net.URLEncoder
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+import kotlin.random.Random
+
+/**
+ * 腾讯云实时语音识别（WebSocket，一句一连接），实现 [AsrBackend]。
+ *
+ * 端点：`wss://asr.cloud.tencent.com/asr/v2/<appid>?<参数>&signature=...`
+ * 鉴权：**HMAC-SHA1 简单签名**（不是 TC3-HMAC-SHA256）。签名原文是
+ * 「host + path + ? + 按字典序拼好的 query」，再
+ * `urlencode(base64(hmac_sha1(secretKey, 原文)))`。顺序错一位就回 4013。
+ * 计价 1 元/小时，每月送 5 小时。
+ *
+ * 为什么一句一连接：v2 流式接口发完 `{"type":"end"}` 会话就结束，同一条连接不能
+ * 连续识别多句。实测建连 200–400ms，比本地 ASR 冷启动的 8 秒便宜得多。
+ */
+class TencentAsrBackend(
+    private val config: com.example.virtualcompanion.data.model.TencentAsrConfig,
+    private val client: OkHttpClient = sharedClient,
+) : AsrBackend {
+
+    companion object {
+        private const val TAG = "TencentAsr"
+        private const val HOST = "asr.cloud.tencent.com"
+        private const val PATH_PREFIX = "/asr/v2/"
+
+        /** 16kHz / 16bit / 单声道：200ms = 3200 个采样点 = 6400 字节。 */
+        const val CHUNK_SAMPLES = 3_200
+
+        /** 建连超时。设备实测 200–400ms，给 8 秒已经很宽松。 */
+        private const val OPEN_TIMEOUT_MS = 8_000L
+
+        private val sharedClient: OkHttpClient by lazy {
+            OkHttpClient.Builder()
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(0, TimeUnit.MILLISECONDS)
+                .writeTimeout(20, TimeUnit.SECONDS)
+                .pingInterval(20, TimeUnit.SECONDS)
+                .build()
+        }
+    }
+
+    override var isOpen: Boolean = false
+        private set
+
+    override var onPartial: ((String) -> Unit)? = null
+    override var onFinal: ((String) -> Unit)? = null
+    override var onError: ((String) -> Unit)? = null
+
+    private var socket: WebSocket? = null
+    private val openLatch = CountDownLatch(1)
+
+    /** 攒够 3200 个采样点再发，太少会让服务端 VAD 判错。 */
+    private val pending = ArrayList<Float>(CHUNK_SAMPLES * 2)
+
+    /** 已发送的累积文本，用来把分段结果拼成一句。 */
+    private val sentences = StringBuilder()
+    private var settled = false
+
+    override fun open(): Boolean {
+        if (!config.isConfigured) {
+            Log.i(TAG, "未配置腾讯云密钥，跳过云端 ASR")
+            return false
+        }
+        sentences.setLength(0)
+        pending.clear()
+        settled = false
+
+        val url = buildUrl()
+        val req = Request.Builder().url(url).build()
+        val ws = client.newWebSocket(req, listener)
+        socket = ws
+
+        val ok = try {
+            openLatch.await(OPEN_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            false
+        }
+        if (!ok || !isOpen) {
+            close()
+            return false
+        }
+        return true
+    }
+
+    override fun send(samples: FloatArray) {
+        if (!isOpen) return
+        for (s in samples) {
+            pending.add(s)
+            if (pending.size >= CHUNK_SAMPLES) {
+                flushChunk()
+            }
+        }
+    }
+
+    private fun flushChunk() {
+        if (pending.isEmpty()) return
+        val n = pending.size
+        val bytes = ByteArray(n * 2)
+        for (i in 0 until n) {
+            val v = (pending[i] * 32767f).toInt().coerceIn(-32768, 32767)
+            bytes[i * 2] = (v and 0xFF).toByte()
+            bytes[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+        }
+        pending.clear()
+        socket?.send(bytes.toByteString())
+    }
+
+    override fun finish() {
+        if (!isOpen) return
+        // 不足一个整块的尾巴也要发出去，否则最后一个字会被切掉
+        flushChunk()
+        socket?.send("""{"type":"end"}""")
+    }
+
+    override fun close() {
+        isOpen = false
+        try {
+            socket?.close(1000, null)
+        } catch (_: Throwable) {
+        }
+        socket = null
+        pending.clear()
+    }
+
+    // ------------------------------------------------------------------ 签名
+
+    /**
+     * 生成带签名的完整 URL。参数顺序必须与签名原文完全一致（字典序）。
+     */
+    fun buildUrl(voiceId: String = "16k_zh"): String {
+        val appId = config.appId
+        val timestamp = System.currentTimeMillis() / 1000
+        val expired = timestamp + 24 * 3600
+        val nonce = Random.nextInt(100_000, 999_999)
+
+        val params = linkedMapOf(
+            "engine_model_type" to "16k_zh",
+            "expired" to expired.toString(),
+            "needvad" to "1",
+            "nonce" to nonce.toString(),
+            "secretid" to config.secretId,
+            "timestamp" to timestamp.toString(),
+            "voice_format" to "1",
+            "voice_id" to voiceId,
+        )
+        val query = params.entries.joinToString("&") { (k, v) -> "$k=$v" }
+        val signSrc = "$HOST$PATH_PREFIX$appId?$query"
+        val signature = hmacSha1Base64(config.secretKey, signSrc)
+        return "wss://$HOST$PATH_PREFIX$appId?$query&signature=${urlEncode(signature)}"
+    }
+
+    private fun hmacSha1Base64(key: String, data: String): String {
+        val mac = Mac.getInstance("HmacSHA1")
+        mac.init(SecretKeySpec(key.toByteArray(Charsets.UTF_8), "HmacSHA1"))
+        return Base64.encodeToString(mac.doFinal(data.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
+    }
+
+    private fun urlEncode(s: String): String =
+        URLEncoder.encode(s, "UTF-8").replace("+", "%20")
+
+    /** 调试用：打印除 signature 外的全部参数（不含 SecretKey），签名错了先看这里。 */
+    fun describeUrl(): String {
+        val url = buildUrl()
+        return url.substringBefore("&signature=").replace(config.secretId, "<secretId>")
+    }
+
+    // ------------------------------------------------------------------ 回调
+
+    private val listener = object : WebSocketListener() {
+        override fun onOpen(webSocket: WebSocket, response: Response) {
+            Log.i(TAG, "connected")
+            isOpen = true
+            openLatch.countDown()
+        }
+
+        override fun onMessage(webSocket: WebSocket, text: String) {
+            val o = try {
+                JSONObject(text)
+            } catch (_: Throwable) {
+                return
+            }
+            val code = o.optInt("code", 0)
+            if (code != 0) {
+                val msg = o.optString("message", "code=$code")
+                Log.w(TAG, "server error $code: $msg")
+                // 4013 = 签名错误；4002 = 音频格式错。这两类必须显式告诉用户，
+                // 否则表现成「说了一句什么也没识别出来」，很难自查。
+                onError?.invoke(
+                    when (code) {
+                        4013 -> "腾讯云签名错误，检查 SecretId/SecretKey/AppId"
+                        4002 -> "腾讯云音频格式不被接受"
+                        else -> "云端识别失败：$msg"
+                    },
+                )
+                return
+            }
+
+            val result = o.optJSONObject("result") ?: return
+            val sliceType = o.optInt("slice_type", 0)
+            val segs = result.optJSONArray("result")
+            val piece = buildString {
+                if (segs != null) {
+                    for (i in 0 until segs.length()) {
+                        append(segs.getJSONObject(i).optString("result", ""))
+                    }
+                }
+            }
+            if (piece.isNotBlank()) {
+                // slice_type: 0=起始 1=中间 2=结束
+                if (sliceType == 1) sentences.append(piece)
+                val sofar = sentences.toString() + if (sliceType == 1) "" else piece
+                if (sofar.isNotBlank()) onPartial?.invoke(sofar)
+            }
+
+            if (sliceType == 2 && !settled) {
+                settled = true
+                val final = sentences.toString().ifBlank { piece }
+                Log.i(TAG, "final: '$final'")
+                onFinal?.invoke(final)
+            }
+        }
+
+        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            // 腾讯云 v2 只回 text 帧，这里理论上不会走到
+        }
+
+        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            val detail = response?.let { " http=${it.code}" } ?: ""
+            Log.w(TAG, "socket failure: ${t.javaClass.simpleName}: ${t.message}$detail")
+            isOpen = false
+            openLatch.countDown()
+            if (!settled) onError?.invoke("云端识别连接失败：${t.message}")
+        }
+
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            Log.i(TAG, "closed code=$code reason=$reason")
+            isOpen = false
+            openLatch.countDown()
+        }
+    }
+}

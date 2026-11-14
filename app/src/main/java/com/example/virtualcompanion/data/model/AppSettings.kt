@@ -26,6 +26,17 @@ data class LlmConfig(
             }
         }
 
+    /** `GET {baseUrl}/v1/models` —— 用来拉取该端点下可用的模型列表。 */
+    val modelsUrl: String
+        get() {
+            val base = baseUrl.trim().trimEnd('/')
+            return when {
+                base.endsWith("/chat/completions") -> base.removeSuffix("/chat/completions") + "/models"
+                base.endsWith("/v1") -> "$base/models"
+                else -> "$base/v1/models"
+            }
+        }
+
     val isConfigured: Boolean get() = apiKey.isNotBlank()
 
     fun toJson(): JSONObject = JSONObject().apply {

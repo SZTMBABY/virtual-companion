@@ -64,6 +64,76 @@ class ChatClient(
             .build()
     }
 
+    /** 拉模型列表的结果：成功带回模型 id 列表，失败带回可直接显示的中文原因。 */
+    sealed interface ModelsResult {
+        data class Ok(val models: List<String>) : ModelsResult
+        data class Fail(val message: String) : ModelsResult
+    }
+
+    /**
+     * `GET {baseUrl}/v1/models` 拉取该端点可用的模型列表。
+     *
+     * 不是所有 OpenAI 兼容网关都实现这个接口（少数只实现 chat/completions），
+     * 所以失败时把 HTTP 状态与 body 片段一并带回，让用户自己判断是「填错地址」
+     * 还是「这网关不支持列表」。
+     */
+    suspend fun listModels(llm: LlmConfig): ModelsResult = withContext(Dispatchers.IO) {
+        if (llm.apiKey.isBlank()) {
+            return@withContext ModelsResult.Fail("先填 API Key 才能拉模型列表。")
+        }
+        val request = Request.Builder()
+            .url(llm.modelsUrl)
+            .addHeader("Authorization", "Bearer ${llm.apiKey}")
+            .addHeader("Accept", "application/json")
+            .get()
+            .build()
+        try {
+            client.newCall(request).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    return@withContext ModelsResult.Fail(httpErrorMessage(resp.code, body))
+                }
+                val models = parseModelIds(body)
+                if (models.isEmpty()) {
+                    ModelsResult.Fail("接口返回了，但里面没有模型。检查 Base URL 是不是指到了 /v1 目录。")
+                } else {
+                    ModelsResult.Ok(models)
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: IOException) {
+            val msg = e.message.orEmpty()
+            if (msg.contains("Canceled", ignoreCase = true)) {
+                return@withContext ModelsResult.Fail("已取消。")
+            }
+            ModelsResult.Fail("网络断了：${msg.ifBlank { "连接失败" }}")
+        }
+    }
+
+    /** 兼容 `{"data":[{"id":"..."}]}`、`{"models":[...]}` 与纯数组三种返回形状。 */
+    private fun parseModelIds(body: String): List<String> = runCatching {
+        val text = body.trim()
+        val arr = when {
+            text.startsWith("[") -> JSONArray(text)
+            else -> {
+                val o = JSONObject(text)
+                o.optJSONArray("data") ?: o.optJSONArray("models") ?: JSONArray()
+            }
+        }
+        buildList {
+            for (i in 0 until arr.length()) {
+                val item = arr.opt(i)
+                val id = when (item) {
+                    is JSONObject -> item.optString("id").ifBlank { item.optString("name") }
+                    is String -> item
+                    else -> ""
+                }
+                if (id.isNotBlank()) add(id)
+            }
+        }.distinct().sorted()
+    }.getOrDefault(emptyList())
+
     /**
      * 发起一次流式对话。挂起直到流结束。
      *

@@ -97,6 +97,12 @@ class VoiceEngine(
     private var backend: AsrBackend? = null
     private var cloudFailed = false
 
+    /** 建连中的任务；切走/退出时要取消，避免晚到的后端被装上去。 */
+    private var openJob: Job? = null
+
+    /** 后端还没就绪时暂存的音频帧（每帧 100ms，40 帧 = 4 秒足够覆盖建连+冷启动）。 */
+    private val preBuffer = ArrayDeque<FloatArray>(40)
+
     val kwsHits: Int get() = kws.hits
 
     fun configure(wake: WakeConfig, engine: AsrEngine) {
@@ -276,42 +282,69 @@ class VoiceEngine(
 
     // ---------------------------------------------------------------- ASR 后端
 
+    /**
+     * 开启一句的识别后端。
+     *
+     * **必须在后台线程做**：云端 [TencentAsrBackend.open] 要等 WebSocket 建连
+     * （阻塞式 `CountDownLatch.await`，超时 8 秒）。这条路径被 `onDone`/`endSpeaking`
+     * 直接调用，一旦跑在主线程就是下一个 ANR。
+     *
+     * 建连期间到达的音频帧不能丢（否则一句话开头 200–400ms 被砍掉，首字经常听不清），
+     * 先塞进 [preBuffer]，就绪后一次性冲进去。
+     */
     private fun openBackend() {
         backend?.close()
         backend = null
+        preBuffer.clear()
+        openJob?.cancel()
 
-        val wantCloud = preferredEngine == AsrEngine.CLOUD_TENCENT && !cloudFailed
-        if (wantCloud) {
-            val factory = cloudAsrFactory
-            val cloud = factory?.invoke()
-            if (cloud != null) {
-                val ok = cloud.open()
-                if (ok) {
-                    backend = cloud
+        openJob = scope.launch(Dispatchers.IO) {
+            val wantCloud = preferredEngine == AsrEngine.CLOUD_TENCENT && !cloudFailed
+            var b: AsrBackend? = null
+
+            if (wantCloud) {
+                val factory = cloudAsrFactory
+                val cloud = factory?.invoke()
+                if (cloud != null && cloud.open()) {
+                    b = cloud
                     _ui.value = _ui.value.copy(asrLabel = "云端识别")
-                    return
+                } else {
+                    if (cloud != null) {
+                        cloud.onError = null
+                        cloud.close()
+                    }
+                    cloudFailed = true
+                    Log.w(TAG, "云端 ASR 不可用，降级本地")
+                    _ui.value = _ui.value.copy(message = "云端识别不可用，已切本地")
                 }
-                cloud.onError = null
-                cloud.close()
-                cloudFailed = true
-                Log.w(TAG, "云端 ASR 打开失败，降级本地")
-                _ui.value = _ui.value.copy(message = "云端识别不可用，已切本地")
-            } else {
-                cloudFailed = true
-                Log.i(TAG, "云端 ASR 未配置，使用本地")
             }
-        }
 
-        // 本地兜底
-        val local = backend ?: LocalAsrBackend().also { backend = it }
-        if (local is LocalAsrBackend) {
-            if (!local.open()) {
-                _ui.value = _ui.value.copy(state = State.ERROR, message = "本地识别模型加载失败")
-                Log.e(TAG, "local asr load failed")
-                return
+            if (b == null) {
+                val local = LocalAsrBackend()
+                if (local.open()) {
+                    b = local
+                    _ui.value = _ui.value.copy(asrLabel = "本地识别")
+                } else {
+                    _ui.value = _ui.value.copy(state = State.ERROR, message = "本地识别模型加载失败")
+                    Log.e(TAG, "local asr load failed")
+                    return@launch
+                }
+            }
+
+            // 期间用户可能已经退出唤醒态
+            if (!awake || !running) {
+                b.close()
+                return@launch
+            }
+
+            synchronized(frameLock) {
+                backend = b
+                // 把建连期间攒下的帧补进去，别让开头几个字丢掉
+                while (preBuffer.isNotEmpty()) {
+                    b.send(preBuffer.removeFirst())
+                }
             }
         }
-        _ui.value = _ui.value.copy(asrLabel = "本地识别")
     }
 
     // ---------------------------------------------------------------- 音频回调
@@ -357,7 +390,14 @@ class VoiceEngine(
             return
         }
 
-        backend?.send(samples)
+        val b = backend
+        if (b == null) {
+            // 后端还在建连：先攒着，别丢开头（openBackend 会一次性补发）
+            if (preBuffer.size >= 40) preBuffer.removeFirst()
+            preBuffer.addLast(samples)
+            return
+        }
+        b.send(samples)
     }
 
     private fun handleFinalText(text: String) {

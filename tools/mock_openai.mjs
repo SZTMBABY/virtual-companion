@@ -13,6 +13,27 @@ const port = Number(process.argv[2] || 8080)
 const REPLY = '{"say":"主人终于来啦，我一直在等你呢。今天想聊点什么？","emotion":"happy","motion":"nod"}'
 
 const server = http.createServer((req, res) => {
+  // 模型列表（验证设置页「拉取模型列表」按钮）
+  if (req.method === 'GET' && req.url.startsWith('/v1/models')) {
+    const auth = req.headers['authorization'] || ''
+    console.log('[mock] GET %s auth=%s', req.url, auth ? 'yes' : 'no')
+    if (!auth.startsWith('Bearer ')) {
+      res.writeHead(401, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: { message: 'missing api key' } }))
+      return
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+      object: 'list',
+      data: [
+        { id: 'deepseek-chat', object: 'model' },
+        { id: 'deepseek-reasoner', object: 'model' },
+        { id: 'mock-tiny', object: 'model' },
+      ],
+    }))
+    return
+  }
+
   if (req.method !== 'POST') {
     res.writeHead(405).end()
     return

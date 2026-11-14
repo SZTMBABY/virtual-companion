@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -25,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,10 +41,12 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.virtualcompanion.data.chat.ChatClient
 import com.example.virtualcompanion.data.model.AppSettings
 import com.example.virtualcompanion.data.model.AsrEngine
 import com.example.virtualcompanion.data.model.CharacterCard
 import com.example.virtualcompanion.data.model.PersonaCard
+import kotlinx.coroutines.launch
 
 /**
  * 设置页（p1-5）。
@@ -64,6 +68,9 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onImportModel: () -> Unit,
     onDeleteModel: () -> Unit,
+    fetchModels: suspend () -> ChatClient.ModelsResult = {
+        ChatClient.ModelsResult.Fail("当前版本没有接模型列表接口。")
+    },
 ) {
     Column(
         modifier = Modifier
@@ -121,6 +128,74 @@ fun SettingsScreen(
                     placeholder = "deepseek-chat",
                     onCommit = { v -> onSettingsChange { it.copy(llm = it.llm.copy(model = v)) } },
                 )
+                // 拉取当前端点支持的模型列表，直接点选，省得手打模型名
+                val scope = rememberCoroutineScope()
+                var models by remember { mutableStateOf<List<String>?>(null) }
+                var fetching by remember { mutableStateOf(false) }
+                var fetchError by remember { mutableStateOf<String?>(null) }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    PillButton(
+                        text = if (fetching) "拉取中…" else "拉取模型列表",
+                        solid = false,
+                        onClick = {
+                            if (fetching) return@PillButton
+                            fetching = true
+                            fetchError = null
+                            scope.launch {
+                                when (val r = fetchModels()) {
+                                    is ChatClient.ModelsResult.Ok -> models = r.models
+                                    is ChatClient.ModelsResult.Fail -> {
+                                        models = null
+                                        fetchError = r.message
+                                    }
+                                }
+                                fetching = false
+                            }
+                        },
+                    )
+                    if (models != null) {
+                        Text(
+                            text = "共 ${models!!.size} 个，点一下选中",
+                            color = Color(0xFF5E7A91),
+                            fontSize = 11.sp,
+                        )
+                    }
+                }
+                fetchError?.let {
+                    Text(text = it, color = Color(0xFFFF8A80), fontSize = 11.sp)
+                }
+                // 列表可能很长（OpenRouter 上千个），限高滚动，避免把 360dp 的屏撑爆
+                models?.let { list ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 160.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        list.forEach { id ->
+                            val selected = id == settings.llm.model
+                            Text(
+                                text = id,
+                                color = if (selected) Color(0xFF9BE7FF) else Color(0xFFB9CCDC),
+                                fontSize = 12.sp,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(
+                                        if (selected) Color(0x332563EB) else Color(0x14FFFFFF)
+                                    )
+                                    .clickable {
+                                        onSettingsChange { it.copy(llm = it.llm.copy(model = id)) }
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+                }
                 Text(
                     text = "实际请求地址：${settings.llm.chatCompletionsUrl}",
                     color = Color(0xFF5E7A91),
@@ -273,6 +348,17 @@ fun SettingsScreen(
                     value = settings.tts.voiceId,
                     placeholder = "saturn_zh_female_keainvsheng_tob",
                     onCommit = { v -> onSettingsChange { it.copy(tts = it.tts.copy(voiceId = v)) } },
+                )
+                TextFieldRow(
+                    label = "资源 ID（决定音色版本）",
+                    value = settings.tts.resourceId,
+                    placeholder = "seed-tts-2.0",
+                    onCommit = { v -> onSettingsChange { it.copy(tts = it.tts.copy(resourceId = v)) } },
+                )
+                Text(
+                    text = "2.0 音色用 seed-tts-2.0；1.0 音色用 seed-tts-1.0；复刻音色用 seed-icl-2.0",
+                    color = Color(0xFF5E7A91),
+                    fontSize = 11.sp,
                 )
             }
 

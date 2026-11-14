@@ -39,7 +39,9 @@ import com.example.virtualcompanion.ui.settings.SettingsScreen
 import com.example.virtualcompanion.ui.theme.VirtualCompanionTheme
 import com.example.virtualcompanion.voice.KwsEngine
 import com.example.virtualcompanion.voice.KwsSelfTest
+import com.example.virtualcompanion.voice.TencentAsrBackend
 import com.example.virtualcompanion.voice.VoiceEngine
+import com.example.virtualcompanion.voice.VolcanoTtsSpeaker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
@@ -102,6 +104,18 @@ class MainActivity : ComponentActivity() {
         }
         var voiceStarted by remember { mutableStateOf(false) }
 
+        // p4 TTS：播报 + 口型。说话时状态机停在 SPEAKING（麦关着），播完才回 AWAKE。
+        val speaker = remember {
+            VolcanoTtsSpeaker(scope).apply {
+                onMouth = { v -> controller.setMouth(v) }
+                onFinish = {
+                    controller.setMouth(0f)
+                    voice.endSpeaking()
+                }
+                onError = { msg -> statusError = msg }
+            }
+        }
+
         val micLauncher = rememberLauncherForActivityResult(
             contract = ActivityResultContracts.RequestPermission(),
         ) { granted ->
@@ -138,6 +152,7 @@ class MainActivity : ComponentActivity() {
             if (clean.isEmpty()) return
             // 先掐掉上一条（用户连发时不该两条一起念）
             replyJob?.cancel()
+            speaker.cancel()
             isBusy = true
             statusError = null
             botMessage = ""
@@ -163,9 +178,10 @@ class MainActivity : ComponentActivity() {
                         override fun onDelta(say: String) {
                             finalSay = say
                             botMessage = say
+                            // 第一段文字到达就进 Speaking（关麦）。
+                            // 不在这里播报：流还没结束，边到边念会把句子切碎。
                             if (!spoke && say.isNotBlank()) {
                                 spoke = true
-                                // 一开口就关麦（约束 1：播报时不听，防自己唤醒自己）
                                 voice.beginSpeaking()
                             }
                         }
@@ -176,8 +192,8 @@ class MainActivity : ComponentActivity() {
                             emotion = reply.emotion
                             controller.setEmotion(reply.emotion)
                             container.conversation.appendAssistant(reply.say)
-                            isBusy = false
-                            voice.endSpeaking()
+                            // 整句拿到后再合成语音，避免切碎的语气
+                            speaker.speak(settings.tts, reply.say)
                         }
 
                         override fun onError(message: String) {
@@ -236,6 +252,18 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // 云端 ASR 工厂：密钥随时可改，所以每次设置变动都重新挂。
+        // 返回 null 表示「云端不可用」，VoiceEngine 会自动落本地。
+        LaunchedEffect(settings.tencentAsr) {
+            voice.cloudAsrFactory = {
+                if (settings.tencentAsr.isConfigured) {
+                    TencentAsrBackend(settings.tencentAsr)
+                } else {
+                    null
+                }
+            }
+        }
+
         // DEBUG 端到端注入：把 files/inject/ 下的 wav 直接灌进语音状态机，
         // 绕过麦克风（扬声器回放会被 AEC 消掉，物理上测不通）。
         LaunchedEffect(Unit) {
@@ -265,6 +293,7 @@ class MainActivity : ComponentActivity() {
             val observer = LifecycleEventObserver { _, event ->
                 if (event == Lifecycle.Event.ON_STOP && voiceStarted) {
                     voice.stop()
+                    speaker.stop()
                     voiceStarted = false
                 }
             }
@@ -272,6 +301,7 @@ class MainActivity : ComponentActivity() {
             onDispose {
                 lifecycleOwner.lifecycle.removeObserver(observer)
                 voice.stop()
+                speaker.stop()
             }
         }
 
@@ -285,6 +315,10 @@ class MainActivity : ComponentActivity() {
                 onPersonaChange = { block -> container.settings.updatePersona(block) },
                 onCharacterChange = { block -> container.settings.updateCharacter(block) },
                 onBack = { showSettings = false },
+                fetchModels = {
+                    // 用 settings 的最新快照去拉，避免用户刚改完 Base URL 却用了旧值
+                    container.chat.listModels(container.settings.settings.value.llm)
+                },
                 onImportModel = { importLauncher.launch(null) },
                 onDeleteModel = {
                     val target = model
@@ -306,7 +340,6 @@ class MainActivity : ComponentActivity() {
             )
             return
         }
-
         MainScreen(
             state = MainUiState(
                 hasModel = model != null,
