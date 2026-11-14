@@ -223,7 +223,15 @@ data class TencentAsrConfig(
 data class WakeConfig(
     /** 关掉后完全不跑 KWS，只能手动点麦克风。 */
     val wakeEnabled: Boolean = true,
-    /** 默认只在前台唤醒；打开后起前台 Service 常驻（耗电）。 */
+    /**
+     * 后台常驻唤醒。
+     *
+     * **当前版本未实现**：宿主没有起 ForegroundService，关屏/切后台后系统会
+     * 回收麦克风，所以这个开关即使为 true 也不会有任何效果。设置页已把它从
+     * 可点开关降级成说明文字。保留字段是为了以后补
+     * `FOREGROUND_SERVICE_MICROPHONE` 类型的常驻通知服务时不必改数据格式；
+     * 读取时一律归零，避免 prefs 里留下和能力不符的 true。
+     */
     val backgroundWakeEnabled: Boolean = false,
     /** 唤醒后连续静默多久退回待机，单位毫秒。用户要求 8 秒。 */
     val silenceTimeoutMs: Long = 8_000L,
@@ -260,7 +268,9 @@ data class WakeConfig(
             val d = WakeConfig()
             return WakeConfig(
                 wakeEnabled = o.optBoolean("wakeEnabled", d.wakeEnabled),
-                backgroundWakeEnabled = o.optBoolean("backgroundWakeEnabled", d.backgroundWakeEnabled),
+                // 一律读成 false：本版本没有前台 Service，true 只会让 UI 与能力不一致。
+                // 等真的补了 FOREGROUND_SERVICE_MICROPHONE 服务，再把这里改回 optBoolean。
+                backgroundWakeEnabled = false,
                 silenceTimeoutMs = o.optLong("silenceTimeoutMs", d.silenceTimeoutMs),
                 maxAwakeMs = o.optLong("maxAwakeMs", d.maxAwakeMs),
                 kwsThreshold = o.optDouble("kwsThreshold", d.kwsThreshold.toDouble()).toFloat(),

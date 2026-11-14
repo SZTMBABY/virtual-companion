@@ -586,11 +586,10 @@ fun SettingsScreen(
                 title = "唤醒",
                 snapshot = settings.wake,
                 onSave = { onSaveSection("唤醒") },
-                summary = when {
-                    !settings.wake.wakeEnabled -> "已关闭"
-                    settings.wake.backgroundWakeEnabled -> "前台 + 后台常驻"
-                    else -> "仅前台"
-                },
+                // 后台常驻还没实现（没有对应的 ForegroundService），所以这里不再
+                // 读 backgroundWakeEnabled —— 之前它会让摘要写着「前台 + 后台常驻」
+                // 但实际切后台就停采，属于骗人的 UI。
+                summary = if (settings.wake.wakeEnabled) "仅前台" else "已关闭",
             ) {
                 SwitchRow(
                     label = "语音唤醒",
@@ -598,13 +597,13 @@ fun SettingsScreen(
                     checked = settings.wake.wakeEnabled,
                     onCheckedChange = { on -> onSettingsChange { it.copy(wake = it.wake.copy(wakeEnabled = on)) } },
                 )
-                SwitchRow(
-                    label = "后台常驻唤醒",
-                    hint = "关屏后仍待命；会更耗电，默认关闭",
-                    checked = settings.wake.backgroundWakeEnabled,
-                    onCheckedChange = { on ->
-                        onSettingsChange { it.copy(wake = it.wake.copy(backgroundWakeEnabled = on)) }
-                    },
+                // 后台常驻唤醒暂未支持：宿主没有实现前台 Service（关屏后系统会
+                // 回收麦克风），所以这里只给说明，不给一个点了没用的开关。
+                // 真要做得落一个 FOREGROUND_SERVICE_MICROPHONE 类型的常驻通知服务。
+                Text(
+                    text = "后台常驻唤醒：暂未支持。目前只在 App 前台、屏幕点亮时监听。",
+                    color = Color(0xFF5E7A91),
+                    fontSize = 11.sp,
                 )
                 SliderRow(
                     label = "唤醒灵敏度（越低越灵敏）",
