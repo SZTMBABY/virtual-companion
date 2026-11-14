@@ -99,6 +99,9 @@ class MainActivity : ComponentActivity() {
 
         // 注入唤醒 WAV 的显式开关（见下面 LaunchedEffect 的注释）。
         const val EXTRA_DEBUG_INJECT = "vc_inject"
+
+        /** DEBUG：直接发一句文字，绕过软键盘（见 LaunchedEffect 里的用法说明）。 */
+        const val EXTRA_DEBUG_TEXT = "vc_text"
     }
 
     @Composable
@@ -586,6 +589,22 @@ class MainActivity : ComponentActivity() {
                 android.util.Log.i("Inject", "start ${f.absolutePath}")
                 voice.debugInjectWav(f.absolutePath)
             }
+        }
+
+        // DEBUG 文字注入：验证「角色卡到底有没有进 prompt」这类问题，用点击输入框
+        // 打字太不稳定（软键盘会把布局顶起来，坐标全变），直接发一句更可靠：
+        //   adb shell am start -n <pkg>/.MainActivity --es vc_text "你好"
+        LaunchedEffect(Unit) {
+            if (!BuildConfig.DEBUG) return@LaunchedEffect
+            val text = intent?.getStringExtra(EXTRA_DEBUG_TEXT)?.trim()
+            if (text.isNullOrBlank()) return@LaunchedEffect
+            var waited = 0
+            while (!voice.ui.value.ready && waited < 30_000) {
+                delay(200)
+                waited += 200
+            }
+            android.util.Log.i("Inject", "text='$text' after ${waited}ms")
+            sendText(text)
         }
 
         // 首次进入就申请麦克风；拒绝时降级为纯文字（决策 Q5 的兜底）。

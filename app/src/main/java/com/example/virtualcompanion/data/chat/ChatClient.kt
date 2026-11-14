@@ -15,6 +15,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
+import com.example.virtualcompanion.BuildConfig
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -386,9 +387,14 @@ object PromptBuilder {
 
         appendLine()
         appendLine("# 你对话的对象")
-        appendLine("名字：${persona.displayName}")
-        if (persona.background.isNotBlank()) appendLine("背景：${persona.background.trim()}")
-        if (persona.preferences.isNotBlank()) appendLine("喜好：${persona.preferences.trim()}")
+        // 只写「名字：X」是不够的：角色设定里如果出现过「主人」，模型会优先沿用那个词，
+        // 用户改了称呼却听不出变化（实机反馈「主人角色卡不生效」就是这么来的）。
+        // 所以这里要明确三件事：怎么称呼、角色设定里的「主人」指谁、不要自作主张换词。
+        appendLine("他希望你称呼他为「${persona.displayName}」。")
+        appendLine("说话时用这个称呼指代他；上面角色设定里出现的「主人」等词，指的就是他。")
+        appendLine("除非他明确要求换个叫法，否则不要改用别的称呼，也不要频繁重复称呼。")
+        if (persona.background.isNotBlank()) appendLine("关于他：${persona.background.trim()}")
+        if (persona.preferences.isNotBlank()) appendLine("他的喜好与雷点（优先遵守）：${persona.preferences.trim()}")
 
         if (character.systemPromptExtra.isNotBlank()) {
             appendLine()
@@ -434,6 +440,7 @@ object PromptBuilder {
         memorySummary: String? = null,
     ): List<ChatMessage> {
         val system = ChatMessage.system(systemPrompt(persona, character, settings))
+        if (BuildConfig.DEBUG) android.util.Log.i("Prompt", "system=\n" + system)
         val memory = if (memorySummary.isNullOrBlank()) {
             null
         } else {

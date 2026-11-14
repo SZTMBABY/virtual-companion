@@ -453,9 +453,14 @@ fun SettingsScreen(
                     onCommit = { v -> onPersonaChange { it.copy(nickname = v) } },
                 )
                 TextAreaRow(
-                    label = "背景 / 喜好",
+                    label = "关于他（作息、工作、住在哪）",
                     value = persona.background,
                     onCommit = { v -> onPersonaChange { it.copy(background = v) } },
+                )
+                TextAreaRow(
+                    label = "喜好与雷点（优先级更高）",
+                    value = persona.preferences,
+                    onCommit = { v -> onPersonaChange { it.copy(preferences = v) } },
                 )
             }
 
