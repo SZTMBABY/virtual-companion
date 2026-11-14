@@ -487,11 +487,14 @@ object PromptBuilder {
         }
         picked.reverse()
 
-        // 称呼这种「随时会变、且历史里全是旧值」的运行时事实，光写在 system 开头不够用：
-        // 实测历史里连着几轮「阿森」之后，即使 system 写的是「主人」，模型仍照抄历史。
+        // 名字/称呼这种「随时会变、且历史里全是旧值」的运行时事实，光写在 system 开头不够用：
+        // 实测历史里连着几轮「阿森」之后，即使 system 写的是「主人」，模型仍照抄历史；
+        // 她自己的名字同理 —— 历史里她自称了十几遍「小鲸」，改名成「小爱」后照样自称「小鲸」。
         // 所以紧贴用户输入再补一条 system 提醒 —— 离得最近的指令遵守率最高。
+        val charName = character.name.ifBlank { "小鲸" }
         val address = ChatMessage.system(
-            "（提醒：他现在的称呼是「${persona.displayName}」。历史对话里出现过的其他叫法都已作废。）",
+            "（提醒：你的名字现在是「$charName」，他现在的称呼是「${persona.displayName}」。" +
+                "历史对话里出现过的其他名字、其他叫法都已作废，不要再沿用。）",
         )
 
         val out = ArrayList<ChatMessage>(picked.size + 4)
