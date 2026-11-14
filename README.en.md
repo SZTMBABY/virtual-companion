@@ -54,6 +54,9 @@ re-publishing upstream artifacts). Fetch and verify them first:
 bash tools/fetch_models.sh
 ```
 
+> **Windows**: run this in **Git Bash** (bundled with Git for Windows). PowerShell
+> and CMD cannot run `.sh` files. Run it from the project root; no admin rights needed.
+
 The script:
 
 1. downloads `sherpa-onnx-v2.0.1.aar` (48 MB) from JitPack → `app/libs/`

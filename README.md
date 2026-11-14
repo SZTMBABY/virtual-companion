@@ -49,6 +49,9 @@
 bash tools/fetch_models.sh
 ```
 
+> **Windows**：这条命令要在 **Git Bash** 里执行（安装 Git for Windows 时自带），
+> 在 PowerShell / CMD 里跑不了 `.sh`。当前目录为项目根目录即可，不需要管理员权限。
+
 脚本会：
 
 1. 从 JitPack 取 `sherpa-onnx-v2.0.1.aar`（48MB）→ `app/libs/`
