@@ -65,6 +65,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.okhttp)
+    implementation(libs.androidx.documentfile)
     // Vendored from JitPack: com.github.k2-fsa.sherpa-onnx:sherpa-onnx:v2.0.1
     implementation(files("libs/sherpa-onnx.aar"))
     testImplementation(libs.junit)
