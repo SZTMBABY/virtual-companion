@@ -20,6 +20,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -73,10 +74,18 @@ class MainActivity : ComponentActivity() {
      */
     private val debugSay = MutableStateFlow<String?>(null)
 
+    /**
+     * 调试用法：**运行中**改称呼，用来验证「设置改了之后语音那条路是否也读到新值」。
+     *   adb shell am start -n <pkg>/.MainActivity --es vc_persona "阿森"
+     * 走 UI 改一次称呼要被软键盘和滚动折腾半天，这个钩子让回归测试可重复。
+     */
+    private val debugPersona = MutableStateFlow<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         debugSay.value = if (BuildConfig.DEBUG) intent?.getStringExtra(EXTRA_DEBUG_SAY) else null
+        debugPersona.value = if (BuildConfig.DEBUG) intent?.getStringExtra(EXTRA_DEBUG_PERSONA) else null
         setContent {
             VirtualCompanionTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A1622)) {
@@ -92,16 +101,19 @@ class MainActivity : ComponentActivity() {
         // 先置空再赋值，保证「同一句话连发两次」也能各触发一次
         debugSay.value = null
         debugSay.value = intent.getStringExtra(EXTRA_DEBUG_SAY)
+        debugPersona.value = null
+        debugPersona.value = intent.getStringExtra(EXTRA_DEBUG_PERSONA)
     }
 
     private companion object {
         const val EXTRA_DEBUG_SAY = "vc_say"
 
+        /** 调试：运行中改主人称呼（见 [debugPersona] 的注释）。 */
+        const val EXTRA_DEBUG_PERSONA = "vc_persona"
+
         // 注入唤醒 WAV 的显式开关（见下面 LaunchedEffect 的注释）。
         const val EXTRA_DEBUG_INJECT = "vc_inject"
 
-        /** DEBUG：直接发一句文字，绕过软键盘（见 LaunchedEffect 里的用法说明）。 */
-        const val EXTRA_DEBUG_TEXT = "vc_text"
     }
 
     @Composable
@@ -490,8 +502,26 @@ class MainActivity : ComponentActivity() {
         }
 
         // 语音回调只挂一次：识别到整句就交给 sendText，与键盘输入同路。
+        //
+        // 坑：这里直接写 `{ text -> sendText(text) }`，lambda 会被 LaunchedEffect(voice)
+        // 捕获并在整个 Activity 生命周期里复用，闭包里锁死的是**第一次组合时**的
+        // persona / character / settings / memory。用户在设置里改了称呼、改了模型，
+        // 键盘输入是对的（MainScreen 每次重组都拿新 lambda），说话进来的却还是旧值
+        // —— 现象就是「改了称呼，她说话时还叫旧名字」。
+        // rememberUpdatedState 让这个固定 lambda 每次都读到最新的 sendText。
+        val latestSend by rememberUpdatedState<(String) -> Unit>({ t -> sendText(t) })
         LaunchedEffect(voice) {
-            voice.onUtterance = { text -> sendText(text) }
+            voice.onUtterance = { text -> latestSend(text) }
+        }
+
+        // DEBUG 旁路：运行中改称呼，验证「改完设置后语音这条路是否读到新值」。
+        LaunchedEffect(Unit) {
+            if (!BuildConfig.DEBUG) return@LaunchedEffect
+            debugPersona.collect { name ->
+                if (name.isNullOrBlank()) return@collect
+                container.settings.updatePersona { it.copy(name = name) }
+                android.util.Log.i("Inject", "persona name → '$name' (in-session)")
+            }
         }
 
         // DEBUG 旁路：等引擎就绪后把 `--es vc_say ...` 的文字送进去（不碰输入框）。
@@ -505,7 +535,7 @@ class MainActivity : ComponentActivity() {
                     delay(200)
                     waited += 200
                 }
-                sendText(say)
+                latestSend(say)
             }
         }
 
@@ -589,22 +619,6 @@ class MainActivity : ComponentActivity() {
                 android.util.Log.i("Inject", "start ${f.absolutePath}")
                 voice.debugInjectWav(f.absolutePath)
             }
-        }
-
-        // DEBUG 文字注入：验证「角色卡到底有没有进 prompt」这类问题，用点击输入框
-        // 打字太不稳定（软键盘会把布局顶起来，坐标全变），直接发一句更可靠：
-        //   adb shell am start -n <pkg>/.MainActivity --es vc_text "你好"
-        LaunchedEffect(Unit) {
-            if (!BuildConfig.DEBUG) return@LaunchedEffect
-            val text = intent?.getStringExtra(EXTRA_DEBUG_TEXT)?.trim()
-            if (text.isNullOrBlank()) return@LaunchedEffect
-            var waited = 0
-            while (!voice.ui.value.ready && waited < 30_000) {
-                delay(200)
-                waited += 200
-            }
-            android.util.Log.i("Inject", "text='$text' after ${waited}ms")
-            sendText(text)
         }
 
         // 首次进入就申请麦克风；拒绝时降级为纯文字（决策 Q5 的兜底）。

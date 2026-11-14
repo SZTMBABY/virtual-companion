@@ -392,6 +392,10 @@ object PromptBuilder {
         // 所以这里要明确三件事：怎么称呼、角色设定里的「主人」指谁、不要自作主张换词。
         appendLine("他希望你称呼他为「${persona.displayName}」。")
         appendLine("说话时用这个称呼指代他；上面角色设定里出现的「主人」等词，指的就是他。")
+        // 用户改了称呼，但历史对话里全是旧称呼（上一轮他自己还被叫「sztm」）。
+        // 模型会照着历史继续说旧称呼 —— 所以必须点明「当前」的以这里为准。
+        appendLine("这是**当前**的称呼。如果他以前让你用别的叫法，以这里为准；")
+        appendLine("历史对话里出现过的旧称呼不要再沿用了，除非他这次又要求改。")
         appendLine("除非他明确要求换个叫法，否则不要改用别的称呼，也不要频繁重复称呼。")
         if (persona.background.isNotBlank()) appendLine("关于他：${persona.background.trim()}")
         if (persona.preferences.isNotBlank()) appendLine("他的喜好与雷点（优先遵守）：${persona.preferences.trim()}")
