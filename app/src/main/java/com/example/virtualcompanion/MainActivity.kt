@@ -614,7 +614,9 @@ class MainActivity : ComponentActivity() {
             lifecycleOwner.lifecycle.addObserver(observer)
             onDispose {
                 lifecycleOwner.lifecycle.removeObserver(observer)
-                voice.stop()
+                // 进程级关闭才释放模型：ON_STOP 只停采集，
+                // 否则每次切后台回来都要重新解析 6 秒的 onnx（实测踩过）。
+                voice.shutdown()
                 speaker.stop()
             }
         }

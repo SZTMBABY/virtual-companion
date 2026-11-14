@@ -379,16 +379,42 @@ class VoiceEngine(
 
     fun stop() {
         running = false
+        starting = false
         silenceJob?.cancel()
         silenceJob = null
         capture.stop()
         backend?.close()
         backend = null
-        kws.release()
-        localAsr.release()
+        // 这里**刻意不释放模型**。
+        //
+        // 原来 stop() 末尾是 kws.release() + localAsr.release()，而 stop() 由 ON_STOP
+        // 在主线程调用；release() 要拿 loadLock，若此刻 load() 正在解析 5.4MB onnx，
+        // 主线程就要干等 4–6 秒。真机日志：
+        //   W Long monitor contention with owner ... at KwsEngine.load(...)(KwsEngine.kt:193)
+        //     waiters=0 in KwsEngine.release() for 4.305s
+        // 4.305s 只差 0.7 秒就是 ANR 阈值。而且代价是双份的：每次切回前台
+        // 都要重新解析 6 秒模型（实测 10 秒内 loaded 了两次）。
+        //
+        // 模型的释放挪到 [shutdown]（进程真要走了才释放），并丢到 IO 线程。
         awake = false
         _ui.value = UiState()
-        Log.i(TAG, "stopped")
+        Log.i(TAG, "stopped (models kept)")
+    }
+
+    /**
+     * 进程级关闭：停采集 + 释放全部 ONNX 模型。
+     *
+     * 只应该由 Activity 的 `onDispose` 调用。释放放后台线程，因为
+     * `KwsEngine.release()` 可能要等 `load()` 的锁（最长 6 秒），
+     * 在主线程序上就是一次 ANR。
+     */
+    fun shutdown() {
+        stop()
+        scope.launch(Dispatchers.IO) {
+            kws.release()
+            localAsr.release()
+            Log.i(TAG, "shutdown: models released")
+        }
     }
 
     // ---------------------------------------------------------------- 状态迁移
