@@ -96,6 +96,9 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val EXTRA_DEBUG_SAY = "vc_say"
+
+        // 注入唤醒 WAV 的显式开关（见下面 LaunchedEffect 的注释）。
+        const val EXTRA_DEBUG_INJECT = "vc_inject"
     }
 
     @Composable
@@ -536,8 +539,14 @@ class MainActivity : ComponentActivity() {
 
         // DEBUG 端到端注入：把 files/inject/ 下的 wav 直接灌进语音状态机，
         // 绕过麦克风（扬声器回放会被 AEC 消掉，物理上测不通）。
+        //
+        // 必须显式触发，不能每次启动都跑：早前无条件执行，结果每次冷启动都会自己
+        // 识别一句「今天天气怎么样？」，看起来像「没人说话却自己应答」，也会盖掉
+        // 用户真正想测的场景。现在只在 intent 带 vc_inject=1 时才注入：
+        //   adb shell am start -n <pkg>/.MainActivity --ez vc_inject true
         LaunchedEffect(Unit) {
             if (!BuildConfig.DEBUG) return@LaunchedEffect
+            if (intent?.getBooleanExtra(EXTRA_DEBUG_INJECT, false) != true) return@LaunchedEffect
             val f = java.io.File(filesDir, "inject/utterance.wav")
             if (!f.exists()) return@LaunchedEffect
             // 必须等 KWS 模型加载完（约 6s），否则喂进去的帧直接丢弃、看起来像「KWS 不响应」。
