@@ -33,7 +33,7 @@ Live2D rendering and context compression.
 | **Voice chat** | Tencent Cloud streaming ASR (WebSocket) → LLM → Volcengine Doubao TTS (bidirectional streaming) | ~4 s per turn end-to-end |
 | **Offline fallback** | On-device ASR (sherpa-onnx 14M int8, 25 MB); falls back automatically when cloud fails | RTF ≈ 0.3 |
 | **Live2D** | WebView + official Cubism Core 5.1, 174 parameters driven in code | 24 fps capped, +19 MB PSS |
-| **Character card** | Two layers: owner persona + character, fully editable | visual editing in Settings |
+| **Character card** | Two layers: owner persona + character, fully editable; **imports SillyTavern V1/V2/V3 cards, exports standard V2** | visual editing + `docs/角色卡格式.md` |
 | **Long-term memory** | billion-context kernel vendored as-is (not rewritten) | compresses to 24–33 %, survives restarts |
 | **Any endpoint** | Any OpenAI-compatible endpoint (DeepSeek / Ollama / one-api / OpenRouter …) | `/v1/models` discovery supported |
 
@@ -221,7 +221,7 @@ LICENSES/                 full texts of third-party licenses
 - **memory compression costs a call**: compaction is a real LLM request and spends tokens;
 - **summaries keep filler words**: compacted summaries may retain “mm”, “ah”, etc.;
 - **first syllable may drop**: audio before the first TTS packet arrives is incomplete;
-- **character card export missing**: personas can only be edited locally;
+- **character cards keep six fields only**: world books, alternate greetings and embedded assets are **dropped** on import and cannot be recovered (listed in the import summary); PNG cards and `.charx` are not supported yet — export as `.json` first;
 - **no soak test**: 10+ back-to-back turns without a restart is not systematically verified.
 
 ---
