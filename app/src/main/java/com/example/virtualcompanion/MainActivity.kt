@@ -29,6 +29,8 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.example.virtualcompanion.data.CharacterCardExporter
+import com.example.virtualcompanion.data.CharacterCardImporter
 import com.example.virtualcompanion.data.Live2DModel
 import com.example.virtualcompanion.data.ModelImporter
 import com.example.virtualcompanion.data.chat.PromptBuilder
@@ -61,6 +63,29 @@ private val POKE_LINES = listOf(
     "嘿嘿，主人在陪我玩吗？",
     "痒……你戳到我的尾巴了。",
 )
+
+/**
+ * 把导入报告拼成一段人能读的中文。
+ *
+ * 不写成「ok=true/ignored=[...]」这种调试口吻：这段话是给用户看的，
+ * 而且是他唯一一次得知「世界书已经没了」的机会。
+ */
+private fun buildCardReport(r: CharacterCardImporter.Report): String = buildString {
+    append("识别为 ").append(r.spec.ifBlank { "未知版本" }).append(" 卡。\n")
+    if (r.imported.isNotEmpty()) {
+        append("\n用上了：\n")
+        r.imported.forEach { append("· ").append(it).append('\n') }
+    }
+    if (r.adjusted.isNotEmpty()) {
+        append("\n改过用法：\n")
+        r.adjusted.forEach { append("· ").append(it).append('\n') }
+    }
+    if (r.ignored.isNotEmpty()) {
+        append("\n没保存（本版本不支持）：\n")
+        r.ignored.forEach { append("· ").append(it).append('\n') }
+        append("\n这些内容不会留在这张卡里，再导出也没有了。")
+    }
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -501,6 +526,77 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // ---- 角色卡导入 / 导出（p7-1）----
+        // 只在设置页用；导入会整张覆盖当前角色卡，所以清单必须当场弹出来。
+        var cardReport by remember { mutableStateOf<String?>(null) }
+
+        val cardImportLauncher = rememberLauncherForActivityResult(
+            // 不能只写 application/json：部分文件管理器把 .json 标成
+            // octet-stream 甚至不标 MIME，过滤太严会让文件变灰点不动。
+            contract = ActivityResultContracts.OpenDocument(),
+        ) { uri: Uri? ->
+            if (uri != null) {
+                scope.launch {
+                    val report = withContext(Dispatchers.IO) {
+                        runCatching {
+                            contentResolver.openInputStream(uri)?.use {
+                                CharacterCardImporter.importFrom(it)
+                            } ?: CharacterCardImporter.Report(
+                                false,
+                                message = "打不开这个文件，可能是权限被收回了。再来一次吧。",
+                            )
+                        }.getOrElse { e ->
+                            CharacterCardImporter.Report(
+                                false,
+                                message = "读不了这个文件：${e.message ?: "未知错误"}",
+                            )
+                        }
+                    }
+                    val card = report.card
+                    if (report.ok && card != null) {
+                        container.settings.updateCharacter { card }
+                        cardReport = buildCardReport(report)
+                        statusError = null
+                        // 卡里带了唤醒词就得让 KWS 换流，否则叫新名字她不动。
+                        val w = card.wakeWord.trim()
+                        if (w.isNotEmpty() && !voice.setWakeWord(w)) {
+                            statusError = "唤醒词「$w」里有模型不认识的字，去唤醒词那一栏换一个吧"
+                        }
+                        refreshModel()
+                    } else {
+                        cardReport = "导入失败：${report.message}"
+                    }
+                }
+            }
+        }
+
+        val cardExportLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.CreateDocument("application/json"),
+        ) { uri: Uri? ->
+            if (uri != null) {
+                val snapshot = container.settings.character.value
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) {
+                        runCatching {
+                            contentResolver.openOutputStream(uri)?.use { out ->
+                                out.write(
+                                    CharacterCardExporter.toV2Json(snapshot).toByteArray(Charsets.UTF_8),
+                                )
+                                out.flush()
+                            } ?: return@runCatching false
+                            true
+                        }.getOrDefault(false)
+                    }
+                    if (ok) {
+                        botMessage = "角色卡导出好了，酒馆和别的 App 都认得这个格式。"
+                        statusError = null
+                    } else {
+                        statusError = "导出失败，可能是存储权限被收回了。"
+                    }
+                }
+            }
+        }
+
         LaunchedEffect(ready) {
             // 开场白同样走占位符替换，否则「主人回来啦」会写死在文本里，
             // 改了称呼这句就不跟着变。
@@ -681,6 +777,18 @@ class MainActivity : ComponentActivity() {
                     container.chat.listModels(container.settings.settings.value.llm)
                 },
                 onImportModel = { importLauncher.launch(null) },
+                onImportCard = {
+                    // 只写 json 会让部分文件管理器把 .json 变灰（MIME 识别不准），
+                    // 所以两个都收，真正的格式判断交给 CharacterCardImporter.parseBytes。
+                    cardImportLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
+                },
+                onExportCard = {
+                    cardExportLauncher.launch(
+                        CharacterCardExporter.suggestedFileName(character),
+                    )
+                },
+                cardReport = cardReport,
+                onDismissCardReport = { cardReport = null },
                 memoryCount = memoryCount,
                 memoryRules = memoryRules,
                 onAddRule = { text ->

@@ -127,6 +127,19 @@ fun SettingsScreen(
      * 光写盘不会让模型改听。
      */
     onSaveSection: (String) -> Unit = {},
+    /** 点「导入角色卡」，真正的系统文件选择器由 Activity 拉起。 */
+    onImportCard: () -> Unit = {},
+    /** 点「导出角色卡」，同上，用的是系统保存对话框。 */
+    onExportCard: () -> Unit = {},
+    /**
+     * 导入完成后要当场念给用户听的清单；null 表示没有要说的。
+     *
+     * 内容由 [com.example.virtualcompanion.data.CharacterCardImporter] 生成，
+     * 这里只负责显示 —— 哪些字段吃进去了、哪些被改过语义、哪些直接丢了，
+     * 都不能藏，否则用户以为世界书还在。
+     */
+    cardReport: String? = null,
+    onDismissCardReport: () -> Unit = {},
 ) {
     var showPrompt by remember { mutableStateOf(false) }
     Column(
@@ -465,6 +478,19 @@ fun SettingsScreen(
                     value = character.firstMessage,
                     onCommit = { v -> onCharacterChange { it.copy(firstMessage = v) } },
                 )
+                // ---- 导入 / 导出（社区 V2 卡） ----
+                // 放在角色组的最后：先让人把名字人设写完，再谈搬运。
+                Text(
+                    "导入会覆盖上面这一整张卡。酒馆的卡能用上名字、设定、性格、场景、" +
+                        "开场白、示例对话六项，世界书和备用开场白等本版本不支持，导入时会列出来。",
+                    color = Color(0xFF6E93AD),
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PillButton(text = "导入角色卡", onClick = onImportCard, solid = false)
+                    PillButton(text = "导出角色卡", onClick = onExportCard, solid = false)
+                }
             }
             // ---- 主人 ----
             Section(
@@ -779,6 +805,30 @@ fun SettingsScreen(
                     color = Color(0xFFDCE9F3),
                     fontSize = 11.sp,
                     lineHeight = 16.sp,
+                    modifier = Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                )
+            },
+            containerColor = Color(0xFF12222F),
+        )
+    }
+
+    if (cardReport != null) {
+        // 导入清单。用户拍定的原则是「没法用的地方直接丢掉」，
+        // 所以丢掉的东西必须当面念出来，不能只写进日志。
+        AlertDialog(
+            onDismissRequest = onDismissCardReport,
+            confirmButton = {
+                TextButton(onClick = onDismissCardReport) { Text("知道了") }
+            },
+            title = { Text("角色卡已导入") },
+            text = {
+                Text(
+                    text = cardReport,
+                    color = Color(0xFFDCE9F3),
+                    fontSize = 11.sp,
+                    lineHeight = 17.sp,
                     modifier = Modifier
                         .heightIn(max = 420.dp)
                         .verticalScroll(rememberScrollState()),

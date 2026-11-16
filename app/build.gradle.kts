@@ -102,6 +102,10 @@ dependencies {
     // Vendored from JitPack: com.github.k2-fsa.sherpa-onnx:sherpa-onnx:v2.0.1
     implementation(files("libs/sherpa-onnx.aar"))
     testImplementation(libs.junit)
+    // 单元测试里 org.json 只是 android.jar 里的空壳（调用会抛 "not mocked"）。
+    // 角色卡的解析逻辑全在 org.json 上，不引一份真实现就没法测。
+    // 只在测试类路径上，不进 APK。
+    testImplementation("org.json:json:20240303")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)
