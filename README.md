@@ -1,15 +1,16 @@
 # 虚拟伴侣 · 小鲸
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Android-8.0%2B%20(arm64--v8a)-3ddc84.svg)](#快速开始)
+[![Platform](https://img.shields.io/badge/Android-11%2B%20(arm64--v8a)-3ddc84.svg)](#快速开始)
 [![Engine](https://img.shields.io/badge/ASR%20%2F%20KWS-sherpa--onnx-blue.svg)](https://github.com/k2-fsa/sherpa-onnx)
 [![Android CI](https://github.com/SZTMBABY/virtual-companion/actions/workflows/android.yml/badge.svg)](https://github.com/SZTMBABY/virtual-companion/actions/workflows/android.yml)
 
 一个跑在 Android 上的语音虚拟伴侣：喊一声「小鲸」就能唤醒，用语音聊天，
 对面是一个 Live2D 角色，记得住很久以前说过的事。
 
-不是演示壳子——所有链路都在一台 2019 年的低端真机（Android 11 / 4×A53 / 3GB /
-640×480）上跑通过，包含本地唤醒、云端语音、Live2D 渲染和上下文压缩。
+不是演示壳子——所有链路都先在开发期的一台 2019 年低端真机（Android 11 / 4×A53 / 3GB /
+640×480）上跑通，现在的主力验证机是 Xiaomi 13（Android 17 / HyperOS / 1080×2400），
+本地唤醒、云端语音、Live2D 渲染和上下文压缩全部在真机上验过。
 
 [English](README.en.md) · [第三方许可](THIRD_PARTY_NOTICES.md)
 
@@ -39,7 +40,7 @@
 ## 快速开始
 
 **环境**：JDK 17+（Android Studio 自带 JBR 即可）、Android SDK Platform 37 + Build-Tools、
-一台 arm64 真机或模拟器。项目用 Gradle wrapper，仓库自带 `gradlew`。
+一台 arm64 真机（x86 模拟器跑不了，只打了 `arm64-v8a`）。项目用 Gradle wrapper，仓库自带 `gradlew`。
 
 ### 1. 拉模型与原生库（必做）
 
@@ -81,7 +82,7 @@ VC_CACHE_DIR=/path/to/cache bash tools/fetch_models.sh   # 复用下载缓存（
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-APK 约 **100MB**（含语音模型与 AAR 里的 `.so`），需要 **arm64-v8a + Android 8.0+**（`minSdk 30`）。
+APK 约 **100MB**（含语音模型与 AAR 里的 `.so`），需要 **arm64-v8a + Android 11+**（`minSdk 30`，`targetSdk 37`）。
 
 > `gradle-wrapper.properties` 指向 `services.gradle.org`。国内网络下载缓慢时，
 > 可临时把它改成镜像地址（例如 `https://mirrors.cloud.tencent.com/gradle/gradle-9.6.0-bin.zip`），
@@ -117,9 +118,12 @@ App 不含模型（授权原因，详见下方「关于模型授权」）。
 
 ## 技术要点
 
-### 为什么唤醒能在这台机器上跑
+> 本节里的硬约束与性能数字，多数是在开发初期那台 2019 低端机（Android 11 / 640×480 / WebView 103）上测出来的。
+> 换成 Xiaomi 13 之后功能全部复验过，但这组具体数值没有重测——它们说明的是「下限」，不是某台机器的特性。
 
-**难点**：目标机无 GMS、无任何 TTS 引擎，`SpeechRecognizer` 不可用；
+### 为什么唤醒能在低端机上跑
+
+**难点**：开发期的目标机无 GMS、无任何 TTS 引擎，`SpeechRecognizer` 不可用；
 Porcupine 免费层已停用，openWakeWord 只有英文。
 
 **解法**：sherpa-onnx 的 Zipformer KWS，中文最小集 8.4MB，
@@ -132,7 +136,7 @@ Porcupine 免费层已停用，openWakeWord 只有英文。
 
 ### 为什么不用系统 TTS
 
-目标机 `settings get secure tts_default_synth` 返回 null，204 个包无一含 tts 服务。
+目标机（开发初期的 2019 低端机）`settings get secure tts_default_synth` 返回 null，204 个包无一含 tts 服务。
 所以 TTS 全部走火山豆包双向流式，音频以 PCM 回来，自己喂给 `AudioTrack`。
 
 **口型的来源是播放中的 PCM 逐块算 RMS**，不是字幕时间戳——
@@ -183,8 +187,9 @@ tools/
 docs/
 ├── 可行性方案.md          需求边界、技术选型、实测证据、风险表
 ├── 施工日志.md            每个阶段的做了什么/怎么验/有无偏离
+├── 角色卡格式.md          导入导出遵循的 V2 规范与我们的扩展键
 ├── proof/                真机截图证据
-└── research/             7 份预研报告（Live2D / 语音栈 / 记忆 / 内核 …）
+└── research/             预研报告（Live2D / 语音栈 / 记忆 / 内核 …）+ 探针
 LICENSES/                 第三方许可全文
 ```
 
@@ -193,7 +198,7 @@ LICENSES/                 第三方许可全文
 ## 已知限制
 
 - **仅 arm64-v8a**：AAR 内含 4 个 ABI，为控体积只打包 arm64；x86 模拟器跑不了；
-- **只在两类真机验证过**：Android 11 GSI（2019 低端机）与 Android 17 / HyperOS；其他 ROM 可能有差异；
+- **只在两类真机验证过**：开发期的 Android 11 GSI（2019 低端机）与现在的 Xiaomi 13（Android 17 / HyperOS V816 / SDK 37，主力验证机）；其他 ROM 可能有差异；
 - **无后台常驻唤醒**：仅前台亮屏监听，关屏/切后台后不再唤醒（系统会回收麦克风）；
 - **单一角色**：只支持一个 Live2D 角色 + 一个主人人设，不支持多角色切换；
 - **动画有限**：模型没有 motion 文件时只有呼吸/眨眼/口型/头部摆动/四种表情；

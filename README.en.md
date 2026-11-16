@@ -1,7 +1,7 @@
 # Virtual Companion · Xiao Jing (小鲸)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Android-8.0%2B%20(arm64--v8a)-3ddc84.svg)](#getting-started)
+[![Platform](https://img.shields.io/badge/Android-11%2B%20(arm64--v8a)-3ddc84.svg)](#getting-started)
 [![Engine](https://img.shields.io/badge/ASR%20%2F%20KWS-sherpa--onnx-blue.svg)](https://github.com/k2-fsa/sherpa-onnx)
 [![Android CI](https://github.com/SZTMBABY/virtual-companion/actions/workflows/android.yml/badge.svg)](https://github.com/SZTMBABY/virtual-companion/actions/workflows/android.yml)
 
@@ -9,9 +9,10 @@ A voice companion that runs on Android: say “小鲸” (Xiao Jing) to wake it,
 it with your voice, and it answers as a Live2D character that remembers things you
 told it long ago.
 
-This is not a demo shell. Every link in the chain was verified on a low-end 2019
-phone (Android 11 / 4×A53 / 3 GB / 640×480): on-device wake word, cloud speech,
-Live2D rendering and context compression.
+This is not a demo shell. Every link in the chain was verified on real hardware:
+first on the 2019 low-end phone we developed against (Android 11 / 4×A53 / 3 GB /
+640×480), now on a Xiaomi 13 (Android 17 / HyperOS / 1080×2400) — on-device wake
+word, cloud speech, Live2D rendering and context compression.
 
 [中文说明](README.md) · [Third-party licenses](THIRD_PARTY_NOTICES.md)
 
@@ -42,8 +43,8 @@ Live2D rendering and context compression.
 ## Getting started
 
 **Requirements**: JDK 17+ (Android Studio's bundled JBR is fine), Android SDK
-Platform 37 + build-tools, and an arm64 device or emulator. The Gradle wrapper
-is included.
+Platform 37 + build-tools, and an arm64 device (x86 emulators won't work — only
+`arm64-v8a` is packaged). The Gradle wrapper is included.
 
 ### 1. Fetch models and native libraries (required)
 
@@ -89,7 +90,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 The APK is about **100 MB** (speech models + the AAR's `.so` files) and requires
-**arm64-v8a, Android 8.0+** (`minSdk 30`).
+**arm64-v8a, Android 11+** (`minSdk 30`, `targetSdk 37`).
 
 > `gradle-wrapper.properties` points at `services.gradle.org`. If that download is
 > slow, temporarily switch it to a mirror (e.g.
@@ -129,9 +130,14 @@ supported yet**: Android reclaims the microphone once the screen is off.
 
 ## Implementation notes
 
-### Why the wake word works on this device
+> Most numbers and hard limits in this section were measured on the 2019 low-end
+> phone we developed against (Android 11 / 640×480 / WebView 103). Everything was
+> re-verified on the Xiaomi 13 afterwards, but these figures were not re-measured —
+> read them as a floor, not as a property of one particular device.
 
-The hard part: the target device has no GMS and no TTS engine at all, so
+### Why the wake word works on low-end hardware
+
+The hard part: the initial target device has no GMS and no TTS engine at all, so
 `SpeechRecognizer` is unusable; Porcupine's free tier is discontinued and
 openWakeWord is English-only.
 
@@ -146,7 +152,7 @@ Three constraints learned the hard way:
 
 ### Why not the system TTS
 
-On the target device `settings get secure tts_default_synth` returns null and none
+On the initial target device `settings get secure tts_default_synth` returns null and none
 of the 204 installed packages exposes a TTS service. So TTS goes entirely through
 Volcengine Doubao bidirectional streaming; PCM comes back and is fed to `AudioTrack`.
 
@@ -202,8 +208,9 @@ tools/
 docs/
 ├── 可行性方案.md          scope, technology choices, measurements, risks (Chinese)
 ├── 施工日志.md            per-phase build log (Chinese)
+├── 角色卡格式.md          character card format, our extension keys (Chinese)
 ├── proof/                device screenshots
-└── research/             7 research reports (Live2D / speech stack / memory / kernel …)
+└── research/             research reports (Live2D / speech stack / memory / kernel …) + probes
 LICENSES/                 full texts of third-party licenses
 ```
 
@@ -212,7 +219,7 @@ LICENSES/                 full texts of third-party licenses
 ## Known limitations
 
 - **arm64-v8a only**: the AAR ships 4 ABIs but only arm64 is packaged for size; it will not run on x86 emulators;
-- **verified on two devices only**: Android 11 GSI (2019 low-end phone) and Android 17 / HyperOS;
+- **verified on two devices only**: the Android 11 GSI we developed against (2019 low-end phone) and a Xiaomi 13 (Android 17 / HyperOS V816 / SDK 37) which is now the primary test device;
 - **no background wake word**: listening only while the screen is on and the app is foregrounded;
 - **single character**: one Live2D character and one owner persona, no switching;
 - **limited animation**: without motion files you get breathing, blinking, lip-sync, head sway and four expressions;
