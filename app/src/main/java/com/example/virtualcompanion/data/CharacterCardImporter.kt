@@ -57,7 +57,34 @@ object CharacterCardImporter {
         val imported: List<String> = emptyList(),
         val adjusted: List<String> = emptyList(),
         val ignored: List<String> = emptyList(),
-    )
+    ) {
+        /**
+         * 拼成给人看的中文清单。
+         *
+         * **顺序是坏消息在前**，不是「用上了 → 改过 → 丢了」。第一版按正序写，
+         * 真机截图一看：弹窗要滑才看得见底部，「没保存」整段落在折叠线外，
+         * 用户读完「用上了」就点了「知道了」。丢掉的东西只有一次机会被看见。
+         *
+         * 放在这里而不是 Activity 里，是为了能被单元测试钉住顺序
+         * （见 `CharacterCardTest.describePutsLossesFirst`）。
+         */
+        fun describe(): String = buildString {
+            if (ignored.isNotEmpty()) {
+                append("这些东西没保存，再导出也没有了：\n")
+                ignored.forEach { append("· ").append(it).append('\n') }
+                append('\n')
+            }
+            append("识别为 ").append(spec.ifBlank { "未知版本" }).append(" 卡。\n")
+            if (imported.isNotEmpty()) {
+                append("\n用上了：\n")
+                imported.forEach { append("· ").append(it).append('\n') }
+            }
+            if (adjusted.isNotEmpty()) {
+                append("\n改过用法：\n")
+                adjusted.forEach { append("· ").append(it).append('\n') }
+            }
+        }
+    }
 
     /**
      * 从 SAF 打开的输入流读一张卡。

@@ -197,4 +197,48 @@ class CharacterCardTest {
         assertEquals("a_b_c_d__e_f_g_h.json", name)
         assertTrue(CharacterCardExporter.suggestedFileName(CharacterCard(name = "   ")).endsWith(".json"))
     }
+
+    @Test
+    fun `describe puts losses before everything else`() {
+        // 真机回归：弹窗要滑才看得见底部，第一版把「没保存」写在最后，
+        // 用户读完「用上了」就关掉了 —— 世界书已经没了这件事他永远不知道。
+        val v3 = """
+            {"spec":"chara_card_v3","spec_version":"3.0","data":{
+              "name":"苏晴","description":"设定","personality":"安静",
+              "system_prompt":"第三人称叙述",
+              "creator_notes":"作者备注",
+              "alternate_greetings":["a","b"],
+              "character_book":{"entries":[
+                {"keys":["钢琴"],"content":"x","enabled":true,"insertion_order":1,"extensions":{}},
+                {"keys":["松香"],"content":"y","enabled":true,"insertion_order":2,"extensions":{}}
+              ]},
+              "extensions":{}}
+            }
+        """.trimIndent()
+        val report = CharacterCardImporter.parse(v3)
+        assertTrue(report.ok)
+
+        val text = report.describe()
+        val loss = text.indexOf("这些东西没保存")
+        assertTrue("清单里必须有「没保存」那一段", loss >= 0)
+        // 坏消息必须是**第一段**：弹窗要滑才能看到底部，排在后面等于没写。
+        assertEquals("坏消息必须从第一个字开始", 0, loss)
+        // 而「用上了」要排在它后面。
+        assertTrue("「用上了」必须排在损失之后", text.indexOf("用上了") > loss)
+        // 损失的具体条目也得在，不能只有标题。
+        assertTrue(text, text.contains("世界书（2 条词条）"))
+        assertTrue(text, text.contains("备用开场白（2 条）"))
+        assertTrue(text, text.contains("作者备注"))
+    }
+
+    @Test
+    fun `describe says nothing about losses when there are none`() {
+        val report = CharacterCardImporter.parse(
+            """
+            {"name":"小鲸","description":"设定","personality":"黏人"}
+            """.trimIndent(),
+        )
+        assertTrue(report.ok)
+        assertFalse(report.describe(), report.describe().contains("没保存"))
+    }
 }

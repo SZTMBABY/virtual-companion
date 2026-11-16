@@ -64,28 +64,10 @@ private val POKE_LINES = listOf(
     "痒……你戳到我的尾巴了。",
 )
 
-/**
- * 把导入报告拼成一段人能读的中文。
- *
- * 不写成「ok=true/ignored=[...]」这种调试口吻：这段话是给用户看的，
- * 而且是他唯一一次得知「世界书已经没了」的机会。
- */
-private fun buildCardReport(r: CharacterCardImporter.Report): String = buildString {
-    append("识别为 ").append(r.spec.ifBlank { "未知版本" }).append(" 卡。\n")
-    if (r.imported.isNotEmpty()) {
-        append("\n用上了：\n")
-        r.imported.forEach { append("· ").append(it).append('\n') }
-    }
-    if (r.adjusted.isNotEmpty()) {
-        append("\n改过用法：\n")
-        r.adjusted.forEach { append("· ").append(it).append('\n') }
-    }
-    if (r.ignored.isNotEmpty()) {
-        append("\n没保存（本版本不支持）：\n")
-        r.ignored.forEach { append("· ").append(it).append('\n') }
-        append("\n这些内容不会留在这张卡里，再导出也没有了。")
-    }
-}
+// 角色卡导入清单现在是 CharacterCardImporter.Report.describe() 生成的：
+// 曾经这里有一份 buildCardReport 副本按「用上了 → 改过 → 丢了」正序拼，
+// 真机截图看出坏消息整段落在折叠线外，用户读完「用上了」就关了弹窗。
+// 顺序现在由 describe() 保证（坏消息在前），并被单元测试钉住。
 
 class MainActivity : ComponentActivity() {
 
@@ -555,7 +537,7 @@ class MainActivity : ComponentActivity() {
                     val card = report.card
                     if (report.ok && card != null) {
                         container.settings.updateCharacter { card }
-                        cardReport = buildCardReport(report)
+                        cardReport = report.describe()
                         statusError = null
                         // 卡里带了唤醒词就得让 KWS 换流，否则叫新名字她不动。
                         val w = card.wakeWord.trim()
